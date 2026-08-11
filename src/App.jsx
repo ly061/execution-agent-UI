@@ -69,6 +69,8 @@ const NAV = [
   { id: "settings", label: "Project settings", icon: GearSix },
 ];
 
+const assetUrl = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
+
 const resultTone = {
   Passed: "success",
   Failed: "danger",
@@ -106,8 +108,8 @@ function useMockDatabase() {
     let active = true;
     async function load() {
       try {
-        const SQL = await initSqlJs({ locateFile: () => "/sql-wasm.wasm" });
-        const bytes = await fetch("/mock-data.sqlite").then((response) => response.arrayBuffer());
+        const SQL = await initSqlJs({ locateFile: () => assetUrl("sql-wasm.wasm") });
+        const bytes = await fetch(assetUrl("mock-data.sqlite")).then((response) => response.arrayBuffer());
         const db = new SQL.Database(new Uint8Array(bytes));
         const payload = {
           projects: query(db, "SELECT * FROM projects ORDER BY id"),
@@ -168,7 +170,7 @@ function Sidebar({ page, setPage, collapsed, setCollapsed }) {
   return (
     <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
       <div className="brand-block">
-        <img src="/qa-orbit-logo.png" alt="QA Orbit" className="brand-logo" />
+        <img src={assetUrl("qa-orbit-logo.png")} alt="QA Orbit" className="brand-logo" />
         {!collapsed && (
           <div>
             <strong>QA Orbit</strong>
@@ -492,7 +494,7 @@ function RunDrawer({ run, onClose, onRerun }) {
         {run.result === "Failed" && (
           <section className="drawer-section">
             <div className="section-label"><FileText size={17} /> Screenshot evidence</div>
-            <img src="/run-evidence.jpg" alt="Execution screenshot evidence" className="evidence-image" />
+            <img src={assetUrl("run-evidence.jpg")} alt="Execution screenshot evidence" className="evidence-image" />
           </section>
         )}
         <div className="drawer-actions">
@@ -1032,7 +1034,7 @@ function ConfirmModal({ title, detail, confirmLabel, onClose, onConfirm }) {
 function LoadingScreen({ error }) {
   return (
     <div className="loading-screen">
-      <img src="/qa-orbit-logo.png" alt="QA Orbit" />
+      <img src={assetUrl("qa-orbit-logo.png")} alt="QA Orbit" />
       {error ? <><strong>Unable to load prototype data</strong><span>{error}</span></> : <><div className="loading-line" /><span>Loading SQLite workspace…</span></>}
     </div>
   );
