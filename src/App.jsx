@@ -60,6 +60,7 @@ import {
 
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: ChartBar },
+  { id: "runs", label: "Test runs", icon: Pulse },
   { id: "plans", label: "Test plans", icon: ClipboardText },
   { id: "sets", label: "Test sets", icon: Rows },
   { id: "cases", label: "Test cases", icon: ListChecks },
@@ -324,9 +325,7 @@ function RunTable({ runs, onSelect }) {
   );
 }
 
-function Dashboard({ data, onRun, onToast }) {
-  const [runTab, setRunTab] = useState("Test cases");
-  const [selectedRun, setSelectedRun] = useState(null);
+function Dashboard({ data, onRun, onToast, onViewRuns }) {
   const [queue, setQueue] = useState(data.queue);
   const results = [
     { name: "Passed", value: data.runs.filter((run) => run.result === "Passed").length, color: "#21a179" },
@@ -367,7 +366,7 @@ function Dashboard({ data, onRun, onToast }) {
         <article className="panel result-panel">
           <div className="panel-heading">
             <div><span className="panel-kicker">Latest run</span><h2>Execution results</h2></div>
-            <button className="text-button">View all runs <CaretRight size={14} /></button>
+            <button className="text-button" onClick={onViewRuns}>View all runs <CaretRight size={14} /></button>
           </div>
           <div className="result-overview">
             <div className="score-block">
@@ -408,28 +407,6 @@ function Dashboard({ data, onRun, onToast }) {
         </article>
       </section>
 
-      <section className="panel runs-panel">
-        <div className="panel-heading table-heading">
-          <div>
-            <span className="panel-kicker">Evidence</span>
-            <h2>Test runs</h2>
-          </div>
-          <div className="table-tools">
-            <div className="segmented-control">
-              {["Test cases", "Test plans", "Test sets"].map((tab) => (
-                <button key={tab} className={runTab === tab ? "active" : ""} onClick={() => setRunTab(tab)}>{tab}</button>
-              ))}
-            </div>
-            <button className="secondary-button compact"><Funnel size={16} /> Filters</button>
-          </div>
-        </div>
-        {runTab === "Test cases" ? (
-          <RunTable runs={data.runs} onSelect={setSelectedRun} />
-        ) : (
-          <EmptyState title={`${runTab} view is ready`} detail="Use the test case view for detailed evidence in this prototype." />
-        )}
-      </section>
-
       <section className="panel queue-panel">
         <div className="panel-heading">
           <div><span className="panel-kicker">Live queue</span><h2>Waiting tasks</h2></div>
@@ -451,6 +428,48 @@ function Dashboard({ data, onRun, onToast }) {
             </div>
           ))}
         </div>
+      </section>
+    </>
+  );
+}
+
+function TestRunsPage({ data, onRun }) {
+  const [runTab, setRunTab] = useState("Test cases");
+  const [selectedRun, setSelectedRun] = useState(null);
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Execution evidence"
+        title="Test runs"
+        description="Review test execution history, results and detailed evidence across cases, plans and sets."
+        actions={
+          <button className="primary-button" onClick={() => onRun("August Release Regression", "Test plan")}>
+            <Play size={17} weight="fill" /> Run test plan
+          </button>
+        }
+      />
+
+      <section className="panel runs-panel">
+        <div className="panel-heading table-heading">
+          <div>
+            <span className="panel-kicker">Evidence</span>
+            <h2>Test runs</h2>
+          </div>
+          <div className="table-tools">
+            <div className="segmented-control">
+              {["Test cases", "Test plans", "Test sets"].map((tab) => (
+                <button key={tab} className={runTab === tab ? "active" : ""} onClick={() => setRunTab(tab)}>{tab}</button>
+              ))}
+            </div>
+            <button className="secondary-button compact"><Funnel size={16} /> Filters</button>
+          </div>
+        </div>
+        {runTab === "Test cases" ? (
+          <RunTable runs={data.runs} onSelect={setSelectedRun} />
+        ) : (
+          <EmptyState title={`${runTab} view is ready`} detail="Use the test case view for detailed evidence in this prototype." />
+        )}
       </section>
 
       {selectedRun && (
@@ -1068,7 +1087,8 @@ export function App() {
   if (!data || !setCaseMemberships || !caseRecords) return <LoadingScreen error={error} />;
 
   const pageContent = {
-    dashboard: <Dashboard data={data} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
+    dashboard: <Dashboard data={data} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} onViewRuns={() => setPage("runs")} />,
+    runs: <TestRunsPage data={data} onRun={(target, type) => setRunModal({ target, type })} />,
     plans: <PlansPage plans={data.plans} sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} planSets={data.planSets} planCases={data.planCases} planCaseExclusions={data.planCaseExclusions} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     sets: <SetsPage sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} setSetCaseMemberships={setSetCaseMemberships} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     cases: <CasesPage cases={caseRecords} setCases={setCaseRecords} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
@@ -1085,7 +1105,7 @@ export function App() {
         <Topbar projects={data.projects} archivedVisible={archivedVisible} setArchivedVisible={setArchivedVisible} />
         <main className="page-content">{pageContent}</main>
       </div>
-      {runModal && <RunModal target={runModal.target} type={runModal.type} applications={data.applications} onClose={() => setRunModal(null)} onStart={() => { setRunModal(null); setToast("Run R-4823 started. 12 case tasks were added to the queue."); setPage("dashboard"); }} />}
+      {runModal && <RunModal target={runModal.target} type={runModal.type} applications={data.applications} onClose={() => setRunModal(null)} onStart={() => { setRunModal(null); setToast("Run R-4823 started. 12 case tasks were added to the queue."); setPage("runs"); }} />}
       {toast && <div className="toast"><CheckCircle size={19} weight="fill" /><span>{toast}</span><button onClick={() => setToast("")} aria-label="Dismiss"><X size={16} /></button></div>}
     </div>
   );
