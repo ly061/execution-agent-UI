@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 
@@ -114,7 +115,8 @@ cur.executescript(
       status TEXT,
       data_points INTEGER,
       created_by TEXT,
-      updated_at TEXT
+      updated_at TEXT,
+      preview_json TEXT
     );
 
     CREATE TABLE applications (
@@ -229,13 +231,31 @@ cur.executemany("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
     (6, "T-167822", "R-4822", 167822, "Resume an interrupted mobile submission", "Mobile Critical Journey", "Mobile claim tracking", "Claims Mobile", "mobile-5.6.1", "UAT", "exec-android-03", "Leo Wong", "11 Aug 2026, 09:45", "—", "Queued", "Queued", 1, "Waiting for available Android executor"),
 ])
 
-cur.executemany("INSERT INTO data_sets VALUES (?,?,?,?,?,?,?,?)", [
-    (62510, "CLAIMS_HAPPY_PATH_V3", "Team Workspace", "File", "Imported", 6, "siqi-li@aia.com", "14 Jul 2026, 10:43"),
-    (60914, "OCR_MULTI_PAGE_INVOICES", "Team Workspace", "File", "Imported", 6, "nelly-l.zhang@aia.com", "10 Jul 2026, 17:22"),
-    (56003, "MOBILE_INTERRUPTED_SESSION", "Team Workspace", "File", "Imported", 34, "aria-z.chen@aia.com", "05 Jun 2026, 10:12"),
-    (56002, "DMS_SIT_DATA", "Team Workspace", "File", "Imported", 5, "aria-z.chen@aia.com", "16 Jun 2026, 15:51"),
-    (55122, "PARTNER_DELEGATED_TOKENS", "Published", "API", "Published", 12, "leo.wong@aia.com", "02 Aug 2026, 09:35"),
-    (54018, "MY_PERSONAL_SANDBOX", "My Workspace", "File", "Draft", 4, "maya.chen@aia.com", "11 Aug 2026, 08:28"),
+cur.executemany("INSERT INTO data_sets VALUES (?,?,?,?,?,?,?,?,?)", [
+    (62510, "CLAIMS_HAPPY_PATH_V3", "Team Workspace", "File", "Imported", 6, "data.owner01@demo.com", "14 Jul 2026, 10:43", json.dumps([
+        {"policy_number": "POL-2026-10031", "claimant_name": "Demo Customer 01", "email": "claimant01@demo.com", "incident_type": "Motor collision", "estimated_loss": "12500.00"},
+        {"policy_number": "POL-2026-10044", "claimant_name": "Demo Customer 02", "email": "claimant02@demo.com", "incident_type": "Windscreen damage", "estimated_loss": "840.00"},
+    ])),
+    (60914, "OCR_MULTI_PAGE_INVOICES", "Team Workspace", "File", "Imported", 6, "data.owner02@demo.com", "10 Jul 2026, 17:22", json.dumps([
+        {"invoice_id": "INV-DEMO-1042", "vendor": "Demo Repair Services", "contact_email": "billing01@demo.com", "pages": 4, "total": "3280.50"},
+        {"invoice_id": "INV-DEMO-1068", "vendor": "Demo Medical Centre", "contact_email": "billing02@demo.com", "pages": 7, "total": "5110.00"},
+    ])),
+    (56003, "MOBILE_INTERRUPTED_SESSION", "Team Workspace", "File", "Imported", 34, "data.owner03@demo.com", "05 Jun 2026, 10:12", json.dumps([
+        {"session_id": "SES-DEMO-201", "user_email": "mobile.user01@demo.com", "last_step": "Evidence upload", "device": "iPhone 16", "draft_age": "18 minutes"},
+        {"session_id": "SES-DEMO-202", "user_email": "mobile.user02@demo.com", "last_step": "Incident details", "device": "Pixel 10", "draft_age": "7 minutes"},
+    ])),
+    (56002, "DMS_SIT_DATA", "Team Workspace", "File", "Imported", 5, "data.owner04@demo.com", "16 Jun 2026, 15:51", json.dumps([
+        {"document_id": "DOC-DEMO-301", "file_name": "sample-invoice.pdf", "owner_email": "document.owner01@demo.com", "mime_type": "application/pdf", "size": "1.8 MB"},
+        {"document_id": "DOC-DEMO-302", "file_name": "unsupported-demo.exe", "owner_email": "document.owner02@demo.com", "mime_type": "application/x-msdownload", "size": "420 KB"},
+    ])),
+    (55122, "PARTNER_DELEGATED_TOKENS", "Published", "API", "Published", 12, "data.owner05@demo.com", "02 Aug 2026, 09:35", json.dumps([
+        {"partner_id": "PARTNER-DEMO-01", "service_email": "partner.service01@demo.com", "scope": "claims:create", "expires_in": 3600, "token_state": "Valid"},
+        {"partner_id": "PARTNER-DEMO-02", "service_email": "partner.service02@demo.com", "scope": "claims:read", "expires_in": 1800, "token_state": "Valid"},
+    ])),
+    (54018, "MY_PERSONAL_SANDBOX", "My Workspace", "File", "Draft", 4, "data.owner06@demo.com", "11 Aug 2026, 08:28", json.dumps([
+        {"claim_id": "CLM-DEMO-401", "user_email": "sandbox.user01@demo.com", "status": "Submitted", "channel": "Mobile", "last_updated": "11 Aug 2026, 08:20"},
+        {"claim_id": "CLM-DEMO-402", "user_email": "sandbox.user02@demo.com", "status": "Under review", "channel": "Web", "last_updated": "11 Aug 2026, 08:24"},
+    ])),
 ])
 
 cur.executemany("INSERT INTO applications VALUES (?,?,?,?,?,?,?)", [
@@ -260,10 +280,10 @@ cur.executemany("INSERT INTO queue VALUES (?,?,?,?,?,?,?,?,?)", [
 ])
 
 cur.executemany("INSERT INTO members VALUES (?,?,?,?,?)", [
-    (1, "Maya Chen", "maya.chen@aia.com", "Owner", "14 Jan 2026"),
-    (2, "Leo Wong", "leo.wong@aia.com", "Member", "14 Jan 2026"),
-    (3, "Nora Lim", "nora.lim@aia.com", "Member", "20 Feb 2026"),
-    (4, "Aria Chen", "aria-z.chen@aia.com", "Member", "02 Mar 2026"),
+    (1, "Maya Chen", "project.owner01@demo.com", "Owner", "14 Jan 2026"),
+    (2, "Leo Wong", "project.member01@demo.com", "Member", "14 Jan 2026"),
+    (3, "Nora Lim", "project.member02@demo.com", "Member", "20 Feb 2026"),
+    (4, "Aria Chen", "project.member03@demo.com", "Member", "02 Mar 2026"),
 ])
 
 cur.executemany("INSERT INTO security_rules VALUES (?,?,?,?,?,?,?)", [

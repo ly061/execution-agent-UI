@@ -879,7 +879,35 @@ function SetsPage({ sets, cases, setCaseMemberships, setSetCaseMemberships, onRu
   );
 }
 
-function CaseEditModal({ testCase, onClose, onSave }) {
+function parseDataPreview(dataSet) {
+  try {
+    const rows = JSON.parse(dataSet?.preview_json || "[]");
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
+function DataPreview({ dataSet, compact = false }) {
+  const rows = parseDataPreview(dataSet);
+  const columns = rows[0] ? Object.keys(rows[0]) : [];
+  if (!rows.length) return <div className="preview-empty"><Database size={20} /><span>No preview data available.</span></div>;
+  return (
+    <div className={`data-preview ${compact ? "compact-preview" : ""}`}>
+      <div className="data-preview-scroll">
+        <table>
+          <thead><tr>{columns.map((column) => <th key={column}>{column.replaceAll("_", " ")}</th>)}</tr></thead>
+          <tbody>{rows.slice(0, compact ? 1 : rows.length).map((row, index) => (
+            <tr key={index}>{columns.map((column) => <td key={column}>{String(row[column] ?? "—")}</td>)}</tr>
+          ))}</tbody>
+        </table>
+      </div>
+      <span className="preview-caption">Previewing {compact ? 1 : rows.length} of {dataSet.data_points} data point(s)</span>
+    </div>
+  );
+}
+
+function CaseEditModal({ testCase, dataSets, onClose, onSave }) {
   const isNew = !testCase?.id;
   const [form, setForm] = useState(testCase || {
     title: "", case_type: "Web", priority: "P1", automation: "Automated", status: "Draft",
@@ -904,7 +932,7 @@ function CaseEditModal({ testCase, onClose, onSave }) {
           </div>
           <label><span>Preconditions</span><textarea value={form.preconditions || ""} onChange={(event) => update("preconditions", event.target.value)} placeholder="Required state before execution" /></label>
           <label><span>Test steps</span><textarea value={form.test_steps || ""} onChange={(event) => update("test_steps", event.target.value)} placeholder="Enter one step per line" /></label>
-          <label><span>Test data</span><input value={form.test_data || ""} onChange={(event) => update("test_data", event.target.value)} placeholder="Data Set or Data Profile reference" /></label>
+          <label><span>Test data</span><select value={form.test_data || ""} onChange={(event) => update("test_data", event.target.value)}><option value="">Not assigned</option>{dataSets.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></label>
           <label><span>Expected result</span><textarea value={form.expected_result || ""} onChange={(event) => update("expected_result", event.target.value)} placeholder="Expected outcome" /></label>
           {!isNew && <div className="inline-notice"><Info size={17} /><span>Test Set membership is managed from Test sets → Manage cases. Editing this Case updates it everywhere it is reused.</span></div>}
         </div>
@@ -914,15 +942,72 @@ function CaseEditModal({ testCase, onClose, onSave }) {
   );
 }
 
-function CasesPage({ cases, setCases, onRun, onToast }) {
+function CaseDetailDrawer({ testCase, dataSet, onClose, onEdit }) {
+  return (
+    <div className="drawer-layer">
+      <button className="drawer-backdrop" onClick={onClose} aria-label="Close test case details" />
+      <aside className="run-drawer case-detail-drawer">
+        <div className="drawer-header"><div><span className="eyebrow">Test case details</span><h2>TC-{testCase.id}</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
+        <div className="drawer-title-row"><div><h3>{testCase.title}</h3><p>Updated {testCase.updated_at}</p></div><StatusPill>{testCase.status}</StatusPill></div>
+        <div className="detail-grid"><div><span>Type</span><strong>{testCase.case_type}</strong></div><div><span>Priority</span><strong>{testCase.priority}</strong></div><div><span>Automation</span><strong>{testCase.automation}</strong></div><div><span>Test set</span><strong>{testCase.test_set}</strong></div></div>
+        <section className="drawer-section"><span className="section-label"><Info size={15} /> Preconditions</span><p className="detail-copy">{testCase.preconditions || "No preconditions defined."}</p></section>
+        <section className="drawer-section"><span className="section-label"><ListChecks size={15} /> Test steps</span><p className="detail-copy pre-line">{testCase.test_steps || "No test steps defined."}</p></section>
+        <section className="drawer-section"><span className="section-label"><CheckCircle size={15} /> Expected result</span><p className="detail-copy">{testCase.expected_result || "No expected result defined."}</p></section>
+        <section className="drawer-section linked-data-section">
+          <div className="section-heading-row"><span className="section-label"><Database size={15} /> Test data preview</span>{dataSet && <StatusPill>{dataSet.status}</StatusPill>}</div>
+          {dataSet ? <><strong className="linked-data-name">{dataSet.name}</strong><DataPreview dataSet={dataSet} /></> : <div className="preview-empty"><Database size={20} /><span>No test data is bound to this case.</span></div>}
+        </section>
+        <div className="drawer-actions"><button className="primary-button" onClick={onEdit}><PencilSimple size={16} /> Edit and bind data</button></div>
+      </aside>
+    </div>
+  );
+}
+
+function DataSetDrawer({ dataSet, cases, onClose, onBind }) {
+  const [selectedCaseIds, setSelectedCaseIds] = useState([]);
+  const linkedCases = cases.filter((testCase) => testCase.test_data === dataSet.name);
+  const toggleCase = (caseId) => setSelectedCaseIds((current) => current.includes(caseId) ? current.filter((id) => id !== caseId) : [...current, caseId]);
+  return (
+    <div className="drawer-layer">
+      <button className="drawer-backdrop" onClick={onClose} aria-label="Close test data details" />
+      <aside className="set-cases-drawer data-set-drawer">
+        <div className="drawer-header"><div><span className="eyebrow">Test data details</span><h2>{dataSet.name}</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
+        <div className="detail-grid"><div><span>Source</span><strong>{dataSet.source_type}</strong></div><div><span>Status</span><strong>{dataSet.status}</strong></div><div><span>Workspace</span><strong>{dataSet.workspace}</strong></div><div><span>Created by</span><strong>{dataSet.created_by}</strong></div></div>
+        <section className="drawer-section"><span className="section-label"><Database size={15} /> Data preview</span><DataPreview dataSet={dataSet} /></section>
+        <section className="case-manager-section"><div className="case-manager-heading"><div><span className="panel-kicker">Current usage</span><h3>Bound test cases</h3></div><span className="subtle-count">{linkedCases.length} case(s)</span></div>
+          <div className="case-manager-list">{linkedCases.map((testCase) => <div className="case-manager-row" key={testCase.id}><div><strong>{testCase.title}</strong><span>TC-{testCase.id} · {testCase.case_type}</span></div><StatusPill>{testCase.status}</StatusPill></div>)}{linkedCases.length === 0 && <div className="mini-empty"><Database size={20} /><span>Not bound to any test case yet.</span></div>}</div>
+        </section>
+        <section className="case-manager-section"><div className="case-manager-heading"><div><span className="panel-kicker">Association</span><h3>Bind test cases</h3></div><span className="subtle-count">{selectedCaseIds.length} selected</span></div>
+          <div className="case-binding-list">{cases.map((testCase) => <label className="case-binding-row" key={testCase.id}><input type="checkbox" checked={selectedCaseIds.includes(testCase.id)} onChange={() => toggleCase(testCase.id)} /><span><strong>{testCase.title}</strong><small>TC-{testCase.id} · Current: {testCase.test_data || "Not assigned"}</small></span></label>)}</div>
+          <div className="drawer-actions"><button className="primary-button" disabled={!selectedCaseIds.length} onClick={() => onBind(dataSet.name, selectedCaseIds)}><Database size={16} /> Bind selected cases</button></div>
+        </section>
+      </aside>
+    </div>
+  );
+}
+
+function CasesPage({ cases, setCases, dataSets, onRun, onToast }) {
   const [queryText, setQueryText] = useState("");
   const [type, setType] = useState("All types");
   const [menuCaseId, setMenuCaseId] = useState(null);
   const [editingCase, setEditingCase] = useState(null);
   const [creatingCase, setCreatingCase] = useState(false);
+  const [viewingCase, setViewingCase] = useState(null);
+  const [selectedCaseIds, setSelectedCaseIds] = useState([]);
+  const [selectedDataSet, setSelectedDataSet] = useState("");
   const filtered = cases.filter((testCase) =>
-    testCase.title.toLowerCase().includes(queryText.toLowerCase()) && (type === "All types" || testCase.case_type === type),
+    (`${testCase.id} ${testCase.title}`).toLowerCase().includes(queryText.toLowerCase()) && (type === "All types" || testCase.case_type === type),
   );
+  const allVisibleSelected = filtered.length > 0 && filtered.every((testCase) => selectedCaseIds.includes(testCase.id));
+  const toggleCase = (caseId) => setSelectedCaseIds((current) => current.includes(caseId) ? current.filter((id) => id !== caseId) : [...current, caseId]);
+  const toggleVisible = () => setSelectedCaseIds((current) => allVisibleSelected ? current.filter((id) => !filtered.some((testCase) => testCase.id === id)) : [...new Set([...current, ...filtered.map((testCase) => testCase.id)])]);
+  function bindSelectedCases() {
+    if (!selectedDataSet || !selectedCaseIds.length) return;
+    setCases((current) => current.map((testCase) => selectedCaseIds.includes(testCase.id) ? { ...testCase, test_data: selectedDataSet, updated_at: "11 Aug 2026" } : testCase));
+    onToast(`${selectedDataSet} bound to ${selectedCaseIds.length} test case(s).`);
+    setSelectedCaseIds([]);
+    setSelectedDataSet("");
+  }
   function saveCase(form) {
     if (form.id) {
       setCases((current) => current.map((item) => item.id === form.id ? { ...item, ...form, updated_at: "11 Aug 2026" } : item));
@@ -950,31 +1035,40 @@ function CasesPage({ cases, setCases, onRun, onToast }) {
         <select className="filter-select" value={type} onChange={(event) => setType(event.target.value)}><option>All types</option><option>Web</option><option>API</option><option>Mobile</option></select>
         <button className="secondary-button compact"><Funnel size={16} /> More filters</button>
       </div>
+      {selectedCaseIds.length > 0 && <div className="bulk-bind-bar"><div><Database size={18} /><strong>{selectedCaseIds.length} test case(s) selected</strong></div><select value={selectedDataSet} onChange={(event) => setSelectedDataSet(event.target.value)}><option value="">Choose test data</option>{dataSets.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><button className="primary-button compact" disabled={!selectedDataSet} onClick={bindSelectedCases}>Bind test data</button><button className="text-button" onClick={() => setSelectedCaseIds([])}>Clear</button></div>}
       <section className="panel flush-panel cases-panel">
         <div className="table-wrap">
-          <table className="data-table">
-            <thead><tr><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Test set</th><th>Automation</th><th>Status</th><th /></tr></thead>
+          <table className="data-table selectable-table">
+            <thead><tr><th><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible} aria-label="Select all visible test cases" /></th><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Test data</th><th>Automation</th><th>Status</th><th /></tr></thead>
             <tbody>{filtered.map((testCase) => (
               <tr key={testCase.id}>
-                <td><button className="table-link" onClick={() => setEditingCase(testCase)}>{testCase.id}</button></td>
+                <td><input type="checkbox" checked={selectedCaseIds.includes(testCase.id)} onChange={() => toggleCase(testCase.id)} aria-label={`Select TC-${testCase.id}`} /></td>
+                <td><button className="table-link" onClick={() => setViewingCase(testCase)}>TC-{testCase.id}</button></td>
                 <td><strong className="cell-primary">{testCase.title}</strong><span className="cell-secondary">Updated {testCase.updated_at}</span></td>
-                <td>{testCase.case_type}</td><td><span className={`priority ${testCase.priority.toLowerCase()}`}>{testCase.priority}</span></td><td>{testCase.test_set}</td><td>{testCase.automation}</td><td><StatusPill>{testCase.status}</StatusPill></td>
+                <td>{testCase.case_type}</td><td><span className={`priority ${testCase.priority.toLowerCase()}`}>{testCase.priority}</span></td><td><span className="data-binding-cell">{testCase.test_data || "Not assigned"}</span></td><td>{testCase.automation}</td><td><StatusPill>{testCase.status}</StatusPill></td>
                 <td><div className="row-actions"><div className="action-menu-wrap"><IconButton label={`More actions for TC-${testCase.id}`} onClick={() => setMenuCaseId((current) => current === testCase.id ? null : testCase.id)}><DotsThree size={19} /></IconButton>{menuCaseId === testCase.id && <div className="action-menu"><button onClick={() => { setEditingCase(testCase); setMenuCaseId(null); }}><PencilSimple size={16} /> Edit case</button><button onClick={() => duplicateCase(testCase)}><Copy size={16} /> Duplicate case</button></div>}</div><button className="primary-button compact" onClick={() => onRun(testCase.title, "Test case")}><Play size={14} weight="fill" /> Run</button></div></td>
               </tr>
             ))}</tbody>
           </table>
         </div>
       </section>
-      {(editingCase || creatingCase) && <CaseEditModal testCase={editingCase} onClose={() => { setEditingCase(null); setCreatingCase(false); }} onSave={saveCase} />}
+      {viewingCase && <CaseDetailDrawer testCase={cases.find((item) => item.id === viewingCase.id) || viewingCase} dataSet={dataSets.find((item) => item.name === (cases.find((item) => item.id === viewingCase.id) || viewingCase).test_data)} onClose={() => setViewingCase(null)} onEdit={() => { setEditingCase(cases.find((item) => item.id === viewingCase.id) || viewingCase); setViewingCase(null); }} />}
+      {(editingCase || creatingCase) && <CaseEditModal testCase={editingCase} dataSets={dataSets} onClose={() => { setEditingCase(null); setCreatingCase(false); }} onSave={saveCase} />}
     </>
   );
 }
 
-function DataPage({ dataSets, onToast }) {
+function DataPage({ dataSets, cases, setCases, onToast }) {
   const [workspace, setWorkspace] = useState("Team Workspace");
   const [queryText, setQueryText] = useState("");
+  const [selectedData, setSelectedData] = useState(null);
   const counts = useMemo(() => Object.fromEntries(["My Workspace", "Team Workspace", "Published"].map((name) => [name, dataSets.filter((item) => item.workspace === name).length])), [dataSets]);
   const filtered = dataSets.filter((item) => item.workspace === workspace && item.name.toLowerCase().includes(queryText.toLowerCase()));
+  function bindCases(dataSetName, caseIds) {
+    setCases((current) => current.map((testCase) => caseIds.includes(testCase.id) ? { ...testCase, test_data: dataSetName, updated_at: "11 Aug 2026" } : testCase));
+    onToast(`${dataSetName} bound to ${caseIds.length} test case(s).`);
+    setSelectedData(null);
+  }
   return (
     <>
       <PageHeader eyebrow="Reusable input" title="Test data" description="Import, publish and reuse data sets across test cases without duplicating fixtures."
@@ -993,11 +1087,12 @@ function DataPage({ dataSets, onToast }) {
             <div className="data-meta"><span>Source type</span><strong>{item.source_type}</strong><span>Updated</span><strong>{item.updated_at}</strong></div>
             <StatusPill>{item.status}</StatusPill>
             <div className="data-card-footer"><div><span>Created by</span><strong>{item.created_by}</strong></div><div className="data-points"><strong>{item.data_points}</strong><span>Data points</span></div></div>
-            <button className="card-hit" onClick={() => onToast(`${item.name} selected for test case association.`)} aria-label={`Open ${item.name}`} />
+            <button className="card-hit" onClick={() => setSelectedData(item)} aria-label={`Open ${item.name}`} />
           </article>
         ))}
         {filtered.length === 0 && <EmptyState title="No data sets here yet" detail="Import a data set or publish one from another workspace." />}
       </div>
+      {selectedData && <DataSetDrawer dataSet={selectedData} cases={cases} onClose={() => setSelectedData(null)} onBind={bindCases} />}
     </>
   );
 }
@@ -1184,8 +1279,8 @@ export function App() {
     runs: <TestRunsPage data={data} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     plans: <PlansPage plans={data.plans} sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} planSets={data.planSets} planCases={data.planCases} planCaseExclusions={data.planCaseExclusions} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     sets: <SetsPage sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} setSetCaseMemberships={setSetCaseMemberships} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
-    cases: <CasesPage cases={caseRecords} setCases={setCaseRecords} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
-    data: <DataPage dataSets={data.dataSets} onToast={setToast} />,
+    cases: <CasesPage cases={caseRecords} setCases={setCaseRecords} dataSets={data.dataSets} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
+    data: <DataPage dataSets={data.dataSets} cases={caseRecords} setCases={setCaseRecords} onToast={setToast} />,
     apps: <AppsPage applications={data.applications} onToast={setToast} />,
     security: <SecurityPage securityRules={data.securityRules} onToast={setToast} />,
     settings: <SettingsPage project={data.projects[0]} members={data.members} onToast={setToast} />,
