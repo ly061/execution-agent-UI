@@ -13,6 +13,24 @@ npm run dev
 
 Open `http://localhost:4173/`.
 
+## One-command local deployment
+
+```bash
+npm run deploy:local
+```
+
+This installs locked dependencies, builds the production site and starts it in the background at `http://localhost:4173/`. The committed SQLite mock database is served with the application.
+
+```bash
+npm run deploy:local:stop
+```
+
+To choose another port, set `DEPLOY_PORT`, for example:
+
+```bash
+DEPLOY_PORT=4180 npm run deploy:local
+```
+
 ## Mock data
 
 The browser loads the committed SQLite database at `public/mock-data.sqlite` through SQL.js. To recreate the complete mock dataset:

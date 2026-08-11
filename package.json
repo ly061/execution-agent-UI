@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "deploy:local": "bash scripts/deploy-local.sh start",
+    "deploy:local:stop": "bash scripts/deploy-local.sh stop",
     "preview": "vite preview",
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
