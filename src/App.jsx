@@ -399,7 +399,7 @@ function RunSummaryTable({ groups, type, onViewCases }) {
   );
 }
 
-function Dashboard({ data, onRun, onViewRuns }) {
+function Dashboard({ data, onViewRuns }) {
   const results = [
     { name: "Passed", value: data.runs.filter((run) => run.result === "Passed").length, color: "#21a179" },
     { name: "Failed", value: data.runs.filter((run) => run.result === "Failed").length, color: "#e45b74" },
@@ -414,12 +414,7 @@ function Dashboard({ data, onRun, onViewRuns }) {
         title="Quality overview"
         description="Live release health and execution evidence for Digital Claims Modernization."
         actions={
-          <>
-            <button className="secondary-button"><DownloadSimple size={17} /> Export report</button>
-            <button className="primary-button" onClick={() => onRun("August Release Regression", "Test plan")}>
-              <Play size={17} weight="fill" /> Run test plan
-            </button>
-          </>
+          <button className="secondary-button"><DownloadSimple size={17} /> Export report</button>
         }
       />
 
@@ -514,11 +509,6 @@ function TestRunsPage({ data, onRun, onToast }) {
         eyebrow="Execution evidence"
         title="Test runs"
         description="Review test execution history, results and detailed evidence across cases, plans and sets."
-        actions={
-          <button className="primary-button" onClick={() => onRun("August Release Regression", "Test plan")}>
-            <Play size={17} weight="fill" /> Run test plan
-          </button>
-        }
       />
 
       <section className={`panel queue-panel queue-collapsible ${queueExpanded ? "expanded" : ""}`}>
@@ -1190,7 +1180,7 @@ export function App() {
   if (!data || !setCaseMemberships || !caseRecords) return <LoadingScreen error={error} />;
 
   const pageContent = {
-    dashboard: <Dashboard data={data} onRun={(target, type) => setRunModal({ target, type })} onViewRuns={() => setPage("runs")} />,
+    dashboard: <Dashboard data={data} onViewRuns={() => setPage("runs")} />,
     runs: <TestRunsPage data={data} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     plans: <PlansPage plans={data.plans} sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} planSets={data.planSets} planCases={data.planCases} planCaseExclusions={data.planCaseExclusions} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     sets: <SetsPage sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} setSetCaseMemberships={setSetCaseMemberships} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
