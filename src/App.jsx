@@ -325,6 +325,80 @@ function RunTable({ runs, onSelect }) {
   );
 }
 
+function summarizeRuns(runs, groupKey) {
+  return Object.values(runs.reduce((groups, run) => {
+    const name = run[groupKey];
+    const group = groups[name] || { name, runs: [] };
+    group.runs.push(run);
+    groups[name] = group;
+    return groups;
+  }, {})).map((group) => {
+    const passed = group.runs.filter((run) => run.result === "Passed").length;
+    const failed = group.runs.filter((run) => run.result === "Failed").length;
+    const completed = passed + failed;
+    const latest = group.runs[group.runs.length - 1];
+    const state = group.runs.some((run) => run.state === "Running")
+      ? "Running"
+      : group.runs.some((run) => run.state === "Queued") ? "Queued" : "Completed";
+    const result = failed > 0 ? "Failed" : state === "Running" ? "Running" : state === "Queued" ? "Queued" : "Passed";
+    return {
+      ...group,
+      passed,
+      failed,
+      state,
+      result,
+      passRate: completed ? `${Math.round((passed / completed) * 100)}%` : "—",
+      build: latest.build,
+      environment: latest.environment,
+      executedBy: latest.executed_by,
+      executionTime: latest.execution_time,
+    };
+  });
+}
+
+function RunSummaryTable({ groups, type, onViewCases }) {
+  return (
+    <div className="table-wrap">
+      <table className="data-table summary-runs-table">
+        <thead>
+          <tr>
+            <th>{type}</th>
+            <th>Cases</th>
+            <th>Passed</th>
+            <th>Failed</th>
+            <th>Pass rate</th>
+            <th>Build</th>
+            <th>Environment</th>
+            <th>Executed by</th>
+            <th>Execution time</th>
+            <th>State</th>
+            <th>Result</th>
+            <th aria-label="Actions" />
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => (
+            <tr key={group.name}>
+              <td><strong className="cell-primary">{group.name}</strong><span className="cell-secondary">Latest grouped execution</span></td>
+              <td>{group.runs.length}</td>
+              <td>{group.passed}</td>
+              <td>{group.failed}</td>
+              <td><strong>{group.passRate}</strong></td>
+              <td>{group.build}</td>
+              <td>{group.environment}</td>
+              <td>{group.executedBy}</td>
+              <td>{group.executionTime}</td>
+              <td><StatusPill>{group.state}</StatusPill></td>
+              <td><StatusPill>{group.result}</StatusPill></td>
+              <td><button className="text-button" onClick={() => onViewCases(group)}>View cases <CaretRight size={14} /></button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Dashboard({ data, onRun, onToast, onViewRuns }) {
   const [queue, setQueue] = useState(data.queue);
   const results = [
@@ -436,6 +510,22 @@ function Dashboard({ data, onRun, onToast, onViewRuns }) {
 function TestRunsPage({ data, onRun }) {
   const [runTab, setRunTab] = useState("Test cases");
   const [selectedRun, setSelectedRun] = useState(null);
+  const [caseScope, setCaseScope] = useState(null);
+  const planRuns = useMemo(() => summarizeRuns(data.runs, "plan_name"), [data.runs]);
+  const setRuns = useMemo(() => summarizeRuns(data.runs, "set_name"), [data.runs]);
+  const visibleCaseRuns = caseScope
+    ? data.runs.filter((run) => run[caseScope.key] === caseScope.name)
+    : data.runs;
+
+  function viewCases(group, key) {
+    setCaseScope({ key, name: group.name });
+    setRunTab("Test cases");
+  }
+
+  function selectTab(tab) {
+    setRunTab(tab);
+    if (tab !== "Test cases") setCaseScope(null);
+  }
 
   return (
     <>
@@ -459,17 +549,16 @@ function TestRunsPage({ data, onRun }) {
           <div className="table-tools">
             <div className="segmented-control">
               {["Test cases", "Test plans", "Test sets"].map((tab) => (
-                <button key={tab} className={runTab === tab ? "active" : ""} onClick={() => setRunTab(tab)}>{tab}</button>
+                <button key={tab} className={runTab === tab ? "active" : ""} onClick={() => selectTab(tab)}>{tab}</button>
               ))}
             </div>
+            {caseScope && <button className="secondary-button compact" onClick={() => setCaseScope(null)}><X size={14} /> Clear {caseScope.name}</button>}
             <button className="secondary-button compact"><Funnel size={16} /> Filters</button>
           </div>
         </div>
-        {runTab === "Test cases" ? (
-          <RunTable runs={data.runs} onSelect={setSelectedRun} />
-        ) : (
-          <EmptyState title={`${runTab} view is ready`} detail="Use the test case view for detailed evidence in this prototype." />
-        )}
+        {runTab === "Test cases" && <RunTable runs={visibleCaseRuns} onSelect={setSelectedRun} />}
+        {runTab === "Test plans" && <RunSummaryTable groups={planRuns} type="Test plan" onViewCases={(group) => viewCases(group, "plan_name")} />}
+        {runTab === "Test sets" && <RunSummaryTable groups={setRuns} type="Test set" onViewCases={(group) => viewCases(group, "set_name")} />}
       </section>
 
       {selectedRun && (
