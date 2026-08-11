@@ -399,8 +399,7 @@ function RunSummaryTable({ groups, type, onViewCases }) {
   );
 }
 
-function Dashboard({ data, onRun, onToast, onViewRuns }) {
-  const [queue, setQueue] = useState(data.queue);
+function Dashboard({ data, onRun, onViewRuns }) {
   const results = [
     { name: "Passed", value: data.runs.filter((run) => run.result === "Passed").length, color: "#21a179" },
     { name: "Failed", value: data.runs.filter((run) => run.result === "Failed").length, color: "#e45b74" },
@@ -408,17 +407,12 @@ function Dashboard({ data, onRun, onToast, onViewRuns }) {
     { name: "Queued", value: data.runs.filter((run) => run.state === "Queued").length, color: "#98a2b3" },
   ];
 
-  function cancelTask(taskId) {
-    setQueue((items) => items.map((item) => item.task_id === taskId ? { ...item, status: "Cancelled" } : item));
-    onToast(`${taskId} was cancelled and removed from the queue.`);
-  }
-
   return (
     <>
       <PageHeader
         eyebrow="Project command center"
         title="Quality overview"
-        description="Live release health, execution evidence and queue status for Digital Claims Modernization."
+        description="Live release health and execution evidence for Digital Claims Modernization."
         actions={
           <>
             <button className="secondary-button"><DownloadSimple size={17} /> Export report</button>
@@ -433,7 +427,7 @@ function Dashboard({ data, onRun, onToast, onViewRuns }) {
         <MetricCard icon={ClipboardText} label="Active test plans" value="4" meta="1 running now" />
         <MetricCard icon={ListChecks} label="Total test cases" value="388" meta="+18 this release" tone="blue" />
         <MetricCard icon={CheckCircle} label="Latest pass rate" value="91%" meta="+3.2% vs previous" tone="green" />
-        <MetricCard icon={Robot} label="Executors online" value="4 / 5" meta="3 tasks queued" tone="amber" />
+        <MetricCard icon={Robot} label="Executors online" value="4 / 5" meta="1 executor offline" tone="amber" />
       </section>
 
       <section className="dashboard-split">
@@ -481,36 +475,18 @@ function Dashboard({ data, onRun, onToast, onViewRuns }) {
         </article>
       </section>
 
-      <section className="panel queue-panel">
-        <div className="panel-heading">
-          <div><span className="panel-kicker">Live queue</span><h2>Waiting tasks</h2></div>
-          <span className="subtle-count">{queue.filter((item) => item.status === "Queued").length} queued</span>
-        </div>
-        <div className="queue-list">
-          {queue.map((item, index) => (
-            <div className={`queue-item ${item.status === "Cancelled" ? "cancelled" : ""}`} key={item.id}>
-              <span className="queue-position">{item.status === "Cancelled" ? <X size={15} /> : index + 1}</span>
-              <div className="queue-copy">
-                <strong>{item.object_name}</strong>
-                <span>{item.task_id} · {item.application} · {item.environment}</span>
-              </div>
-              <span className="queue-owner">{item.submitted_by}</span>
-              <StatusPill>{item.status}</StatusPill>
-              {item.status === "Queued" && (
-                <button className="danger-text-button" onClick={() => cancelTask(item.task_id)}>Cancel</button>
-              )}
-            </div>
-          ))}
-        </div>
-      </section>
     </>
   );
 }
 
-function TestRunsPage({ data, onRun }) {
+function TestRunsPage({ data, onRun, onToast }) {
   const [runTab, setRunTab] = useState("Test cases");
   const [selectedRun, setSelectedRun] = useState(null);
   const [caseScope, setCaseScope] = useState(null);
+  const [queue, setQueue] = useState(data.queue);
+  const [queueExpanded, setQueueExpanded] = useState(false);
+  const maxConcurrentRuns = 3;
+  const queuedCount = queue.filter((item) => item.status === "Queued").length;
   const planRuns = useMemo(() => summarizeRuns(data.runs, "plan_name"), [data.runs]);
   const setRuns = useMemo(() => summarizeRuns(data.runs, "set_name"), [data.runs]);
   const visibleCaseRuns = caseScope
@@ -527,6 +503,11 @@ function TestRunsPage({ data, onRun }) {
     if (tab !== "Test cases") setCaseScope(null);
   }
 
+  function cancelTask(taskId) {
+    setQueue((items) => items.map((item) => item.task_id === taskId ? { ...item, status: "Cancelled" } : item));
+    onToast(`${taskId} was cancelled and removed from the queue.`);
+  }
+
   return (
     <>
       <PageHeader
@@ -539,6 +520,39 @@ function TestRunsPage({ data, onRun }) {
           </button>
         }
       />
+
+      <section className={`panel queue-panel queue-collapsible ${queueExpanded ? "expanded" : ""}`}>
+        <button className="queue-summary-button" onClick={() => setQueueExpanded((expanded) => !expanded)} aria-expanded={queueExpanded}>
+          <span className="queue-summary-icon"><Queue size={20} weight="duotone" /></span>
+          <span className="queue-summary-copy">
+            <span className="panel-kicker">Live queue</span>
+            <strong>Waiting tasks</strong>
+          </span>
+          <span className="queue-capacity">
+            <small>Queued / max concurrent</small>
+            <strong>{queuedCount} / {maxConcurrentRuns}</strong>
+          </span>
+          {queueExpanded ? <CaretDown size={18} /> : <CaretRight size={18} />}
+        </button>
+        {queueExpanded && (
+          <div className="queue-list">
+            {queue.map((item, index) => (
+              <div className={`queue-item ${item.status === "Cancelled" ? "cancelled" : ""}`} key={item.id}>
+                <span className="queue-position">{item.status === "Cancelled" ? <X size={15} /> : index + 1}</span>
+                <div className="queue-copy">
+                  <strong>{item.object_name}</strong>
+                  <span>{item.task_id} · {item.application} · {item.environment}</span>
+                </div>
+                <span className="queue-owner">{item.submitted_by}</span>
+                <StatusPill>{item.status}</StatusPill>
+                {item.status === "Queued" && (
+                  <button className="danger-text-button" onClick={() => cancelTask(item.task_id)}>Cancel</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="panel runs-panel">
         <div className="panel-heading table-heading">
@@ -1176,8 +1190,8 @@ export function App() {
   if (!data || !setCaseMemberships || !caseRecords) return <LoadingScreen error={error} />;
 
   const pageContent = {
-    dashboard: <Dashboard data={data} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} onViewRuns={() => setPage("runs")} />,
-    runs: <TestRunsPage data={data} onRun={(target, type) => setRunModal({ target, type })} />,
+    dashboard: <Dashboard data={data} onRun={(target, type) => setRunModal({ target, type })} onViewRuns={() => setPage("runs")} />,
+    runs: <TestRunsPage data={data} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     plans: <PlansPage plans={data.plans} sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} planSets={data.planSets} planCases={data.planCases} planCaseExclusions={data.planCaseExclusions} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     sets: <SetsPage sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} setSetCaseMemberships={setSetCaseMemberships} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     cases: <CasesPage cases={caseRecords} setCases={setCaseRecords} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,

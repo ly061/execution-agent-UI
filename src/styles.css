@@ -181,6 +181,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .status-pill.info { color: #315db9; background: #edf3ff; }
 .status-pill.warning { color: #a36512; background: #fff5e4; }
 .status-pill.neutral { color: #667085; background: #f1f3f6; }
+.queue-collapsible { margin-bottom: 16px; }
+.queue-summary-button { width: 100%; min-height: 76px; border: 0; background: #fff; display: grid; grid-template-columns: 40px minmax(0,1fr) auto 20px; align-items: center; gap: 12px; padding: 14px 18px; color: var(--ink); text-align: left; }
+.queue-summary-button:hover { background: #fcf8fa; }
+.queue-summary-icon { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; color: var(--pink); background: var(--pink-soft); }
+.queue-summary-copy { display: flex; flex-direction: column; gap: 4px; }
+.queue-summary-copy strong { font-family: "Manrope", sans-serif; font-size: 15px; }
+.queue-capacity { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; padding-right: 8px; }
+.queue-capacity small { color: #98a2b3; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
+.queue-capacity strong { color: var(--pink); font-family: "Manrope", sans-serif; font-size: 20px; letter-spacing: -.03em; }
+.queue-collapsible.expanded .queue-list { border-top: 1px solid var(--line); }
 .queue-list { padding: 4px 16px 10px; }
 .queue-item { display: grid; grid-template-columns: 30px minmax(0,1fr) 100px auto 60px; gap: 12px; align-items: center; min-height: 56px; border-bottom: 1px solid #f0f1f4; }
 .queue-item:last-child { border-bottom: 0; }
