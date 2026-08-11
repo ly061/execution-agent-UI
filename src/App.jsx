@@ -907,6 +907,29 @@ function DataPreview({ dataSet, compact = false }) {
   );
 }
 
+function DataSetLabel({ dataSet, name }) {
+  const label = dataSet?.name || name;
+  if (!label) return <span className="data-binding-empty">Not assigned</span>;
+  return (
+    <span className="data-set-label-wrap">
+      <span className="data-set-label" tabIndex={0}><Database size={13} weight="duotone" />{label}</span>
+      <span className="data-set-tooltip" role="tooltip">
+        <strong>{label}</strong>
+        {dataSet ? (
+          <span className="data-set-tooltip-grid">
+            <span>Source <b>{dataSet.source_type}</b></span>
+            <span>Status <b>{dataSet.status}</b></span>
+            <span>Workspace <b>{dataSet.workspace}</b></span>
+            <span>Data points <b>{dataSet.data_points}</b></span>
+            <span>Created by <b>{dataSet.created_by}</b></span>
+            <span>Updated <b>{dataSet.updated_at}</b></span>
+          </span>
+        ) : <span className="data-set-tooltip-missing">Data set details are unavailable.</span>}
+      </span>
+    </span>
+  );
+}
+
 function CaseEditModal({ testCase, dataSets, onClose, onSave }) {
   const isNew = !testCase?.id;
   const [form, setForm] = useState(testCase || {
@@ -914,6 +937,7 @@ function CaseEditModal({ testCase, dataSets, onClose, onSave }) {
     preconditions: "", test_steps: "", test_data: "", expected_result: "", test_set: "Not assigned",
   });
   const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
+  const selectedDataSet = dataSets.find((item) => item.name === form.test_data);
   return (
     <div className="modal-layer">
       <button className="modal-backdrop" onClick={onClose} aria-label="Close test case editor" />
@@ -932,7 +956,17 @@ function CaseEditModal({ testCase, dataSets, onClose, onSave }) {
           </div>
           <label><span>Preconditions</span><textarea value={form.preconditions || ""} onChange={(event) => update("preconditions", event.target.value)} placeholder="Required state before execution" /></label>
           <label><span>Test steps</span><textarea value={form.test_steps || ""} onChange={(event) => update("test_steps", event.target.value)} placeholder="Enter one step per line" /></label>
-          <label><span>Test data</span><select value={form.test_data || ""} onChange={(event) => update("test_data", event.target.value)}><option value="">Not assigned</option>{dataSets.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></label>
+          <label>
+            <span>Test data</span>
+            {form.test_data ? (
+              <span className="selected-data-control">
+                <DataSetLabel dataSet={selectedDataSet} name={form.test_data} />
+                <button type="button" className="text-button" onClick={() => update("test_data", "")}>Change</button>
+              </span>
+            ) : (
+              <select value="" onChange={(event) => update("test_data", event.target.value)}><option value="">Not assigned</option>{dataSets.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select>
+            )}
+          </label>
           <label><span>Expected result</span><textarea value={form.expected_result || ""} onChange={(event) => update("expected_result", event.target.value)} placeholder="Expected outcome" /></label>
           {!isNew && <div className="inline-notice"><Info size={17} /><span>Test Set membership is managed from Test sets → Manage cases. Editing this Case updates it everywhere it is reused.</span></div>}
         </div>
@@ -1045,7 +1079,7 @@ function CasesPage({ cases, setCases, dataSets, onRun, onToast }) {
                 <td><input type="checkbox" checked={selectedCaseIds.includes(testCase.id)} onChange={() => toggleCase(testCase.id)} aria-label={`Select TC-${testCase.id}`} /></td>
                 <td><button className="table-link" onClick={() => setViewingCase(testCase)}>TC-{testCase.id}</button></td>
                 <td><strong className="cell-primary">{testCase.title}</strong><span className="cell-secondary">Updated {testCase.updated_at}</span></td>
-                <td>{testCase.case_type}</td><td><span className={`priority ${testCase.priority.toLowerCase()}`}>{testCase.priority}</span></td><td><span className="data-binding-cell">{testCase.test_data || "Not assigned"}</span></td><td>{testCase.automation}</td><td><StatusPill>{testCase.status}</StatusPill></td>
+                <td>{testCase.case_type}</td><td><span className={`priority ${testCase.priority.toLowerCase()}`}>{testCase.priority}</span></td><td><span className="data-binding-cell"><DataSetLabel dataSet={dataSets.find((item) => item.name === testCase.test_data)} name={testCase.test_data} /></span></td><td>{testCase.automation}</td><td><StatusPill>{testCase.status}</StatusPill></td>
                 <td><div className="row-actions"><div className="action-menu-wrap"><IconButton label={`More actions for TC-${testCase.id}`} onClick={() => setMenuCaseId((current) => current === testCase.id ? null : testCase.id)}><DotsThree size={19} /></IconButton>{menuCaseId === testCase.id && <div className="action-menu"><button onClick={() => { setEditingCase(testCase); setMenuCaseId(null); }}><PencilSimple size={16} /> Edit case</button><button onClick={() => duplicateCase(testCase)}><Copy size={16} /> Duplicate case</button></div>}</div><button className="primary-button compact" onClick={() => onRun(testCase.title, "Test case")}><Play size={14} weight="fill" /> Run</button></div></td>
               </tr>
             ))}</tbody>
