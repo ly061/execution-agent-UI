@@ -13,6 +13,19 @@ const FIELD_ALIASES = {
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 const requestApiKey = (request, env) => request.headers.get("x-deepseek-api-key")?.trim() || env.DEEPSEEK_API_KEY;
+const ALLOWED_ORIGINS = new Set(["https://ly061.github.io", "http://localhost:4173", "http://localhost:5173", "http://127.0.0.1:4173", "http://127.0.0.1:5173"]);
+
+function withCors(response, request) {
+  const origin = request.headers.get("origin");
+  if (!origin || !ALLOWED_ORIGINS.has(origin)) return response;
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", origin);
+  headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Content-Type, X-DeepSeek-API-Key");
+  headers.set("Access-Control-Max-Age", "86400");
+  headers.set("Vary", "Origin");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
 const normalize = (value) => String(value ?? "").trim().toLowerCase().replaceAll("_", " ").replace(/[\s\-–—/:()]+/g, " ");
 
 function mappingFor(header, used) {
@@ -218,7 +231,10 @@ async function handleApi(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/")) return handleApi(request, env, url);
+    if (url.pathname.startsWith("/api/")) {
+      if (request.method === "OPTIONS") return withCors(new Response(null, { status: 204 }), request);
+      return withCors(await handleApi(request, env, url), request);
+    }
     const response = await env.ASSETS.fetch(request);
     const acceptsHtml = request.headers.get("accept")?.includes("text/html");
     if (response.status !== 404 || !acceptsHtml || !["GET", "HEAD"].includes(request.method)) return response;

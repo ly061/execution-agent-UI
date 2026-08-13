@@ -90,6 +90,19 @@ test("validates a manually supplied API key without persisting it", async () => 
   }
 });
 
+test("allows the GitHub Pages frontend to call the API", async () => {
+  const request = new Request("https://example.test/api/health", { headers: { Origin: "https://ly061.github.io" } });
+  const response = await worker.fetch(request, {});
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://ly061.github.io");
+
+  const preflight = await worker.fetch(new Request("https://example.test/api/imports/preview", {
+    method: "OPTIONS",
+    headers: { Origin: "https://ly061.github.io", "Access-Control-Request-Headers": "x-deepseek-api-key" },
+  }), {});
+  assert.equal(preflight.status, 204);
+  assert.match(preflight.headers.get("Access-Control-Allow-Headers"), /X-DeepSeek-API-Key/);
+});
+
 test("imports, edits, undoes, and confirms cases through the deployed API", async () => {
   let payload;
   const DB = {

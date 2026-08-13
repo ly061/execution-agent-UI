@@ -76,6 +76,9 @@ const NAV = [
 
 const CURRENT_USER = "maya.chen@demo.com";
 const API_KEY_STORAGE = "qa-orbit-deepseek-api-key";
+const API_ORIGIN = window.location.hostname === "ly061.github.io"
+  ? "https://test-management-prototype.poetic-cod-6823.chatgpt.site"
+  : "";
 
 const assetUrl = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 
@@ -1081,10 +1084,17 @@ async function apiRequest(path, options = {}) {
   const apiKey = window.localStorage.getItem(API_KEY_STORAGE)?.trim();
   const headers = new Headers(options.headers || {});
   if (apiKey) headers.set("X-DeepSeek-API-Key", apiKey);
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(`${API_ORIGIN}${path}`, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || "The import agent could not complete the request.");
   return body;
+}
+
+function MappingQuality({ mapping }) {
+  if (!mapping.target_field) return <small className="mapping-quality preserved" title="Not mapped to the standard schema; the original column and value are preserved.">Preserved</small>;
+  if (mapping.reason === "LangChain semantic mapping") return <small className="mapping-quality ai" title="DeepSeek selected this mapping from the column name and sample values.">AI match · {Math.round(mapping.confidence * 100)}%</small>;
+  if (mapping.reason === "Similar field name") return <small className="mapping-quality similar" title="Matched because the source column closely resembles a known field name.">Similar match</small>;
+  return <small className="mapping-quality exact" title="Matched using a configured field alias.">Exact match</small>;
 }
 
 function ImportAgentModal({ onClose, onImported }) {
@@ -1181,7 +1191,7 @@ function ImportAgentModal({ onClose, onImported }) {
         </div>}
 
         {stage === "preview" && preview && <div className="import-preview-body">
-          <section className="import-summary-grid"><div><strong>{preview.cases.length}</strong><span>Cases detected</span></div><div><strong>{preview.sheets.filter((sheet) => sheet.status === "imported").length}</strong><span>Sheets imported</span></div><div><strong>{preview.cases.filter((item) => item.warnings.length).length}</strong><span>Need attention</span></div></section>
+          <section className="import-summary-strip"><span><strong>{preview.cases.length}</strong> cases</span><i /><span><strong>{preview.sheets.filter((sheet) => sheet.status === "imported").length}</strong> sheets</span><i /><span className={preview.cases.some((item) => item.warnings.length) ? "has-warning" : ""}><strong>{preview.cases.filter((item) => item.warnings.length).length}</strong> need attention</span></section>
           <section className="agent-workspace">
             <div className="agent-explanation"><div className="agent-avatar"><Robot size={18} weight="duotone" /></div><div><div className="agent-workspace-title"><strong>How I handled this file</strong><span className="draft-badge">Draft</span></div>{preview.explanation.map((line) => <p key={line}>{line}</p>)}</div></div>
             <div className="agent-refine-intro"><strong>Review or correct my work</strong><span>Tell me what to change below. Nothing is imported until you confirm.</span></div>
@@ -1189,11 +1199,13 @@ function ImportAgentModal({ onClose, onImported }) {
             <div className="chat-suggestions"><button onClick={() => sendMessage("请解释一下你是怎么处理这个文件的")}>Explain this import</button><button onClick={() => sendMessage("撤销")}>Undo last change</button></div>
             <div className="chat-composer"><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder="在导入前修改，例如：第七条 case 的 user name 应该用 Lisa" /><button className="primary-button" disabled={!message.trim() || busy} onClick={() => sendMessage()}><PaperPlaneTilt size={17} weight="fill" /> Send</button></div>
           </section>
-          <div className="sheet-report-list">{preview.sheets.map((sheet) => <details key={sheet.name} open={sheet.status === "imported"}>
+          <div className="case-preview-heading"><div><strong>Parsed test cases</strong><span>Review all {preview.cases.length} rows before import</span></div><span>{preview.cases.length} cases</span></div>
+          <div className="case-preview-table"><table><thead><tr><th>#</th><th>Source</th><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Extra fields</th></tr></thead><tbody>{preview.cases.map((item) => <tr key={`${item.source_sheet}-${item.source_row}`}><td>{item.import_order}</td><td>{item.source_sheet} · {item.source_row}</td><td>{item.case_id}</td><td>{item.description || "—"}</td><td>{item.case_type}</td><td>{item.priority}</td><td>{Object.keys(item.extra_fields).length}</td></tr>)}</tbody></table></div>
+          <div className="sheet-report-heading"><strong>Source sheets & field mappings</strong><span>Collapsed to prioritize case review</span></div>
+          <div className="sheet-report-list">{preview.sheets.map((sheet) => <details key={sheet.name}>
             <summary><span><FileText size={16} /><strong>{sheet.name}</strong></span><StatusPill tone={sheet.status === "imported" ? "success" : "neutral"}>{sheet.status === "imported" ? `${sheet.row_count} cases` : "Skipped"}</StatusPill></summary>
-            {sheet.status === "imported" ? <div className="mapping-chips">{sheet.mappings.map((mapping) => <span key={mapping.source_column}><b>{mapping.source_column}</b><CaretRight size={12} /><em>{mapping.target_field || "extra_fields"}</em><small>{Math.round(mapping.confidence * 100)}%</small></span>)}</div> : <p className="sheet-skip-reason">{sheet.reason}</p>}
+            {sheet.status === "imported" ? <div className="mapping-chips">{sheet.mappings.map((mapping) => <span key={mapping.source_column}><b>{mapping.source_column}</b><CaretRight size={12} /><em>{mapping.target_field || "extra_fields"}</em><MappingQuality mapping={mapping} /></span>)}</div> : <p className="sheet-skip-reason">{sheet.reason}</p>}
           </details>)}</div>
-          <div className="case-preview-table"><table><thead><tr><th>#</th><th>Source</th><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Extra fields</th></tr></thead><tbody>{preview.cases.slice(0, 12).map((item) => <tr key={`${item.source_sheet}-${item.source_row}`}><td>{item.import_order}</td><td>{item.source_sheet} · {item.source_row}</td><td>{item.case_id}</td><td>{item.description || "—"}</td><td>{item.case_type}</td><td>{item.priority}</td><td>{Object.keys(item.extra_fields).length}</td></tr>)}</tbody></table></div>
         </div>}
 
         {error && <div className="import-error"><Warning size={17} /><span>{error}</span></div>}
