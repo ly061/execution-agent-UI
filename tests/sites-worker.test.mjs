@@ -73,6 +73,23 @@ test("serves the deployed backend health endpoint", async () => {
   });
 });
 
+test("validates a manually supplied API key without persisting it", async () => {
+  const originalFetch = globalThis.fetch;
+  let authorization;
+  globalThis.fetch = async (_url, options) => {
+    authorization = options.headers.Authorization;
+    return new Response(JSON.stringify({ object: "list" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const response = await worker.fetch(new Request("https://example.test/api/config/validate", { method: "POST", headers: { "X-DeepSeek-API-Key": "sk-user-key" } }), {});
+    assert.equal(response.status, 200);
+    assert.equal(authorization, "Bearer sk-user-key");
+    assert.equal((await response.json()).valid, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("imports, edits, undoes, and confirms cases through the deployed API", async () => {
   let payload;
   const DB = {

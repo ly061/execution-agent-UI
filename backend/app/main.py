@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+import httpx
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import database
@@ -36,6 +37,19 @@ def health() -> dict[str, str]:
         "model": DEEPSEEK_MODEL,
         "model_configured": str(deepseek_enabled()).lower(),
     }
+
+
+@app.post("/api/config/validate")
+async def validate_api_key(x_deepseek_api_key: str | None = Header(default=None)) -> dict[str, object]:
+    if not x_deepseek_api_key:
+        raise HTTPException(status_code=400, detail="Enter a DeepSeek API key first.")
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get("https://api.deepseek.com/models", headers={"Authorization": f"Bearer {x_deepseek_api_key}"})
+    if response.status_code == 401:
+        raise HTTPException(status_code=401, detail="DeepSeek rejected this API key.")
+    if not response.is_success:
+        raise HTTPException(status_code=502, detail="DeepSeek could not verify this API key right now.")
+    return {"valid": True, "provider": "deepseek", "model": DEEPSEEK_MODEL}
 
 
 @app.post("/api/imports/preview", response_model=ImportPreview)

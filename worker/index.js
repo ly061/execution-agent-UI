@@ -12,6 +12,7 @@ const FIELD_ALIASES = {
 };
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+const requestApiKey = (request, env) => request.headers.get("x-deepseek-api-key")?.trim() || env.DEEPSEEK_API_KEY;
 const normalize = (value) => String(value ?? "").trim().toLowerCase().replaceAll("_", " ").replace(/[\s\-–—/:()]+/g, " ");
 
 function mappingFor(header, used) {
@@ -105,8 +106,47 @@ function frontend(testCase, index) {
   return { ...testCase, id: numeric, title: testCase.description || "Imported test case", test_set: "Not assigned", automation: "Manual", status: "Draft", updated_at: "Just now" };
 }
 
+async function interpretWithDeepSeek(message, session, request, env) {
+  const apiKey = requestApiKey(request, env);
+  if (!apiKey) return null;
+  const response = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: env.DEEPSEEK_MODEL || "deepseek-v4-flash",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: "You edit exactly one imported QA case. Return JSON only with import_order (integer), field (one exact existing standard or extra field name), value (string), and message (short confirmation). Never return or repeat credentials." },
+        { role: "user", content: JSON.stringify({ request: message, cases: session.cases.map(({ import_order, case_id, description, case_type, priority, test_data, extra_fields }) => ({ import_order, case_id, description, case_type, priority, test_data, extra_fields })) }) },
+      ],
+      thinking: { type: "disabled" },
+    }),
+  });
+  if (!response.ok) throw new Error(response.status === 401 ? "DeepSeek rejected this API key." : "DeepSeek could not process this request right now.");
+  const result = await response.json();
+  const content = result.choices?.[0]?.message?.content;
+  const decision = JSON.parse(content || "{}");
+  const order = Number(decision.import_order);
+  const item = session.cases[order - 1];
+  const field = String(decision.field || "").trim();
+  if (!item || !field || decision.value == null) return null;
+  const extra = !(field in item);
+  const before = extra ? item.extra_fields[field] : item[field];
+  const value = String(decision.value);
+  if (extra) item.extra_fields[field] = value; else item[field] = value;
+  return { change: { case_id: item.case_id, import_order: order, field, before, after: value, extra }, message: String(decision.message || "").trim() };
+}
+
 async function handleApi(request, env, url) {
-  if (request.method === "GET" && url.pathname === "/api/health") return json({ status: "ok", framework: "cloudflare-worker", provider: "deepseek", model: env.DEEPSEEK_MODEL || "deepseek-v4-flash", model_configured: String(Boolean(env.DEEPSEEK_API_KEY)) });
+  if (request.method === "GET" && url.pathname === "/api/health") return json({ status: "ok", framework: "cloudflare-worker", provider: "deepseek", model: env.DEEPSEEK_MODEL || "deepseek-v4-flash", model_configured: String(Boolean(requestApiKey(request, env))) });
+  if (request.method === "POST" && url.pathname === "/api/config/validate") {
+    const apiKey = requestApiKey(request, env);
+    if (!apiKey) return json({ detail: "Enter a DeepSeek API key first." }, 400);
+    const response = await fetch("https://api.deepseek.com/models", { headers: { Authorization: `Bearer ${apiKey}` } });
+    if (!response.ok) return json({ detail: response.status === 401 ? "DeepSeek rejected this API key." : "DeepSeek could not verify this API key right now." }, response.status === 401 ? 401 : 502);
+    return json({ valid: true, provider: "deepseek", model: env.DEEPSEEK_MODEL || "deepseek-v4-flash" });
+  }
   const isPreview = request.method === "POST" && url.pathname === "/api/imports/preview";
   const match = url.pathname.match(/^\/api\/imports\/([^/]+)\/(confirm|cases|chat)$/);
   if (!isPreview && !match) return json({ detail: "API route not found" }, 404);
@@ -135,6 +175,7 @@ async function handleApi(request, env, url) {
     const { message = "" } = await request.json();
     const undo = /\bundo\b|撤销|取消上次/i.test(message);
     let change;
+    let modelMessage = "";
     if (undo) {
       change = session.history.pop();
       if (!change) return json({ message: "There is no case change to undo.", changes: [], cases: [], can_undo: false });
@@ -149,17 +190,27 @@ async function handleApi(request, env, url) {
       const aliases = { "case id": "case_id", 用例编号: "case_id", "case type": "case_type", 类型: "case_type", description: "description", 描述: "description", preconditions: "preconditions", 前置条件: "preconditions", "test steps": "test_steps", 步骤: "test_steps", "test data": "test_data", 测试数据: "test_data", "expected result": "expected_result", 预期结果: "expected_result", priority: "priority", 优先级: "priority", "user name": "User Name", username: "User Name", 用户名: "User Name" };
       const field = Object.entries(aliases).find(([alias]) => message.toLowerCase().includes(alias.toLowerCase()))?.[1];
       const value = message.match(/(?:应该(?:用|是)?|改成|改为|更新为|\buse\b|\bto\b|=)\s*[\"“']?([^\"”'，。,.]+)/i)?.[1]?.trim();
-      if (!order || !field || !value || !session.cases[order - 1]) return json({ message: "I could not identify an exact case, field, and value. Try: ‘第七条 case 的 user name 改为 Lisa’.", changes: [], cases: [], can_undo: session.history.length > 0 });
-      const item = session.cases[order - 1];
-      const extra = !(field in item);
-      const before = extra ? item.extra_fields[field] : item[field];
-      if (extra) item.extra_fields[field] = value; else item[field] = value;
-      change = { case_id: item.case_id, import_order: order, field, before, after: value, extra };
+      if (!order || !field || !value || !session.cases[order - 1]) {
+        try {
+          const interpreted = await interpretWithDeepSeek(message, session, request, env);
+          if (!interpreted) return json({ message: requestApiKey(request, env) ? "I could not identify a safe single-case change." : "I could not identify an exact case, field, and value. Add a DeepSeek API key in Project settings for flexible language.", changes: [], cases: [], can_undo: session.history.length > 0 });
+          change = interpreted.change;
+          modelMessage = interpreted.message;
+        } catch (error) {
+          return json({ detail: error.message }, error.message.includes("rejected") ? 401 : 502);
+        }
+      } else {
+        const item = session.cases[order - 1];
+        const extra = !(field in item);
+        const before = extra ? item.extra_fields[field] : item[field];
+        if (extra) item.extra_fields[field] = value; else item[field] = value;
+        change = { case_id: item.case_id, import_order: order, field, before, after: value, extra };
+      }
       session.history.push(change);
     }
     await saveSession(env.DB, session);
     const changed = session.cases[change.import_order - 1];
-    return json({ message: undo ? `Undid the last change to case ${change.import_order}.` : `Updated case ${change.import_order} (${change.case_id}). ${change.field}: ${String(change.before ?? "")} → ${String(change.after)}. You can undo this change.`, changes: [change], cases: [frontend(changed, change.import_order - 1)], can_undo: !undo && session.history.length > 0 });
+    return json({ message: undo ? `Undid the last change to case ${change.import_order}.` : modelMessage || `Updated case ${change.import_order} (${change.case_id}). ${change.field}: ${String(change.before ?? "")} → ${String(change.after)}. You can undo this change.`, changes: [change], cases: [frontend(changed, change.import_order - 1)], can_undo: !undo && session.history.length > 0 });
   }
   return json({ detail: "Method not allowed" }, 405);
 }

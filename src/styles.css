@@ -374,6 +374,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .owner-row strong { font-size: 11.5px; }
 .owner-add-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding-top: 6px; border-top: 1px solid #eef0f4; margin-top: 2px; }
 .owner-add-row input { width: 100%; min-height: 36px; border: 1px solid #dfe3ea; border-radius: 8px; padding: 8px 11px; color: var(--ink); background: #fff; font-size: 11.5px; }
+.api-key-panel { margin-top: 16px; overflow: hidden; }
+.api-key-content { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(360px, 1.2fr); align-items: end; gap: 24px; padding: 18px; }
+.api-key-copy { display: flex; align-items: flex-start; gap: 10px; color: var(--pink); }
+.api-key-copy > svg { flex: 0 0 auto; margin-top: 1px; }
+.api-key-copy > div { display: flex; flex-direction: column; gap: 5px; }
+.api-key-copy strong { color: #243246; font-size: 11.5px; }
+.api-key-copy span { color: #667085; font-size: 10px; line-height: 1.5; }
+.api-key-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.api-key-controls label { display: flex; flex-direction: column; gap: 6px; color: #475467; font-size: 10px; font-weight: 700; }
+.api-key-controls input { width: 100%; min-height: 39px; border: 1px solid #dfe3ea; border-radius: 8px; padding: 9px 11px; color: var(--ink); background: #fff; font-size: 11.5px; }
 
 .merge-panel { overflow: hidden; display: flex; flex-direction: column; }
 .merge-summary { display: flex; align-items: flex-start; gap: 9px; padding: 14px 18px; color: #8a2a44; background: #fff8fb; border-bottom: 1px solid var(--line); font-size: 10.5px; line-height: 1.45; }
@@ -599,6 +609,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .page-header { align-items: flex-start; flex-direction: column; }
   .page-actions { width: 100%; flex-wrap: wrap; }
   .dashboard-split, .settings-layout { grid-template-columns: 1fr; }
+  .api-key-content { grid-template-columns: 1fr; }
   .plan-grid, .app-grid { grid-template-columns: 1fr; }
   .data-card-grid { grid-template-columns: 1fr; }
   .plan-detail-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -641,6 +652,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .workspace-tabs { overflow-x: auto; }
   .workspace-tabs button { min-width: 130px; }
   .form-row { grid-template-columns: 1fr; }
+  .api-key-controls { grid-template-columns: 1fr; }
   .queue-item { grid-template-columns: 28px minmax(0,1fr) auto; padding: 8px 0; }
   .queue-owner { display: none; }
   .queue-item .status-pill { display: none; }

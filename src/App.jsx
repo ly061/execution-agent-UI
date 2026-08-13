@@ -75,6 +75,7 @@ const NAV = [
 ];
 
 const CURRENT_USER = "maya.chen@demo.com";
+const API_KEY_STORAGE = "qa-orbit-deepseek-api-key";
 
 const assetUrl = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 
@@ -1077,7 +1078,10 @@ function DataSetDrawer({ dataSet, cases, onClose, onBind, onDelete, canEdit = tr
 }
 
 async function apiRequest(path, options = {}) {
-  const response = await fetch(path, options);
+  const apiKey = window.localStorage.getItem(API_KEY_STORAGE)?.trim();
+  const headers = new Headers(options.headers || {});
+  if (apiKey) headers.set("X-DeepSeek-API-Key", apiKey);
+  const response = await fetch(path, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || "The import agent could not complete the request.");
   return body;
@@ -1429,7 +1433,33 @@ function SettingsPage({ project, projects, projectMerges, setProjectMerges, onTo
   const [owners, setOwners] = useState([project.owner]);
   const [editingOwners, setEditingOwners] = useState(false);
   const [newOwner, setNewOwner] = useState("");
+  const [apiKey, setApiKey] = useState(() => window.localStorage.getItem(API_KEY_STORAGE) || "");
+  const [apiKeyStatus, setApiKeyStatus] = useState(apiKey ? "saved" : "empty");
+  const [apiKeyBusy, setApiKeyBusy] = useState(false);
   const mergedSrs = projectMerges[project.id] || [];
+
+  async function saveApiKey() {
+    const value = apiKey.trim();
+    if (!value) {
+      window.localStorage.removeItem(API_KEY_STORAGE);
+      setApiKeyStatus("empty");
+      onToast("DeepSeek API key removed from this browser.");
+      return;
+    }
+    setApiKeyBusy(true);
+    setApiKeyStatus("checking");
+    try {
+      const result = await apiRequest("/api/config/validate", { method: "POST", headers: { "X-DeepSeek-API-Key": value } });
+      window.localStorage.setItem(API_KEY_STORAGE, value);
+      setApiKeyStatus("valid");
+      onToast(`DeepSeek API key verified for ${result.model || "the import agent"}.`);
+    } catch (validationError) {
+      setApiKeyStatus("invalid");
+      onToast(validationError.message);
+    } finally {
+      setApiKeyBusy(false);
+    }
+  }
 
   function updateMergedSrs(next) {
     setProjectMerges((current) => ({ ...current, [project.id]: next }));
@@ -1583,6 +1613,16 @@ function SettingsPage({ project, projects, projectMerges, setProjectMerges, onTo
           </div>
         </section>
       </div>
+      <section className="panel api-key-panel">
+        <div className="panel-heading"><div><span className="panel-kicker">Import agent</span><h2>DeepSeek API key</h2></div><StatusPill tone={apiKeyStatus === "valid" ? "success" : apiKeyStatus === "invalid" ? "danger" : "info"}>{apiKeyStatus === "valid" ? "Verified" : apiKeyStatus === "invalid" ? "Invalid" : apiKey ? "Saved" : "Not configured"}</StatusPill></div>
+        <div className="api-key-content">
+          <div className="api-key-copy"><Key size={20} weight="duotone" /><div><strong>Use your own key for AI-assisted imports</strong><span>The key stays in this browser and is sent only with import-agent requests. It is never written to the project database or source code.</span></div></div>
+          <div className="api-key-controls">
+            <label><span>API key</span><input type="password" autoComplete="off" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setApiKeyStatus(event.target.value.trim() ? "saved" : "empty"); }} placeholder="sk-…" aria-label="DeepSeek API key" /></label>
+            <button className="primary-button" disabled={apiKeyBusy} onClick={saveApiKey}><Check size={16} /> {apiKeyBusy ? "Verifying…" : apiKey.trim() ? "Save & verify" : "Remove key"}</button>
+          </div>
+        </div>
+      </section>
       <section className="danger-zone">
         <div><Archive size={22} /><div><strong>Archive project</strong><span>Only admins can archive. Historical evidence remains available.</span></div></div>
         <button className="danger-button" onClick={() => setArchivalOpen(true)}>Archive project</button>
