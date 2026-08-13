@@ -57,8 +57,61 @@ test("does not turn missing API or write requests into the app shell", async () 
     });
 
     assert.equal(response.status, 404);
-    assert.equal(calls, 1);
+    assert.equal(calls, request.url.includes("/api/") ? 0 : 1);
   }
+});
+
+test("serves the deployed backend health endpoint", async () => {
+  const response = await worker.fetch(new Request("https://example.test/api/health"), {});
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    status: "ok",
+    framework: "cloudflare-worker",
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+    model_configured: "false",
+  });
+});
+
+test("imports, edits, undoes, and confirms cases through the deployed API", async () => {
+  let payload;
+  const DB = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          return {
+            async run() {
+              if (sql.startsWith("INSERT")) payload = values[3];
+              return {};
+            },
+            async first() {
+              return payload ? { payload_json: payload } : null;
+            },
+          };
+        },
+      };
+    },
+  };
+  const workbook = new FormData();
+  workbook.set("file", new File(["Case ID,Description,Steps,Expected Result,User Name\nWEB-1,Login,Submit form,Dashboard opens,Joe"], "cases.csv", { type: "text/csv" }));
+  const previewResponse = await worker.fetch(new Request("https://example.test/api/imports/preview", { method: "POST", body: workbook }), { DB });
+  assert.equal(previewResponse.status, 200);
+  const preview = await previewResponse.json();
+  assert.equal(preview.cases.length, 1);
+  assert.equal(preview.cases[0].extra_fields["User Name"], "Joe");
+
+  const chatResponse = await worker.fetch(new Request(`https://example.test/api/imports/${preview.import_id}/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "第一条 case 的 user name 改为 Lisa" }) }), { DB });
+  assert.equal(chatResponse.status, 200);
+  const chat = await chatResponse.json();
+  assert.equal(chat.cases[0].extra_fields["User Name"], "Lisa");
+
+  const undoResponse = await worker.fetch(new Request(`https://example.test/api/imports/${preview.import_id}/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "撤销" }) }), { DB });
+  assert.equal((await undoResponse.json()).cases[0].extra_fields["User Name"], "Joe");
+
+  const confirmResponse = await worker.fetch(new Request(`https://example.test/api/imports/${preview.import_id}/confirm`, { method: "POST" }), { DB });
+  const confirmed = await confirmResponse.json();
+  assert.equal(confirmed.imported_count, 1);
+  assert.equal(confirmed.cases[0].title, "Login");
 });
 
 test("emits the files required by Sites packaging", async () => {
