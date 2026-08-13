@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import initSqlJs from "sql.js";
 import {
   Pulse,
@@ -27,6 +27,7 @@ import {
   Info,
   Key,
   ListChecks,
+  Lock,
   MagnifyingGlass,
   PauseCircle,
   PencilSimple,
@@ -41,10 +42,13 @@ import {
   SlidersHorizontal,
   StopCircle,
   TestTube,
+  Trash,
   UploadSimple,
   UserCircle,
   Users,
   Warning,
+  PaperPlaneTilt,
+  Sparkle,
   X,
 } from "@phosphor-icons/react";
 import {
@@ -64,11 +68,13 @@ const NAV = [
   { id: "plans", label: "Test plans", icon: ClipboardText },
   { id: "sets", label: "Test sets", icon: Rows },
   { id: "cases", label: "Test cases", icon: ListChecks },
-  { id: "data", label: "Test data", icon: Database },
+  { id: "data", label: "My data", icon: Database },
   { id: "apps", label: "App config", icon: AppWindow },
   { id: "security", label: "Security config", icon: ShieldCheck },
   { id: "settings", label: "Project settings", icon: GearSix },
 ];
+
+const CURRENT_USER = "maya.chen@demo.com";
 
 const assetUrl = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 
@@ -90,6 +96,7 @@ const resultTone = {
   Offline: "neutral",
   Error: "danger",
   Published: "success",
+  Shared: "info",
   Imported: "info",
 };
 
@@ -214,8 +221,16 @@ function Sidebar({ page, setPage, collapsed, setCollapsed }) {
   );
 }
 
-function Topbar({ projects, archivedVisible, setArchivedVisible }) {
+function Topbar({ projects, projectMerges, selectedSr, onSelectSr, archivedVisible, setArchivedVisible }) {
   const visibleProjects = projects.filter((project) => archivedVisible || project.status !== "Archived");
+  const projectOptions = visibleProjects.flatMap((project) => {
+    const mergedSrs = projectMerges?.[project.id] || [];
+    return [
+      { value: project.sr, label: project.sr, subLabel: project.name, primary: true },
+      ...mergedSrs.map((sr) => ({ value: sr, label: sr, subLabel: project.name, primary: false })),
+    ];
+  });
+  const currentProject = projectOptions.find((option) => option.value === selectedSr) || projectOptions[0];
   return (
     <header className="topbar">
       <div className="breadcrumbs">
@@ -233,13 +248,26 @@ function Topbar({ projects, archivedVisible, setArchivedVisible }) {
         </label>
         <label className="context-select project-select">
           <span>Project</span>
-          <select defaultValue="Digital Claims Modernization">
-            {visibleProjects.map((project) => (
-              <option key={project.id}>{project.name}</option>
-            ))}
+          <select value={selectedSr} onChange={(event) => onSelectSr(event.target.value)} aria-label="Project">
+            {visibleProjects.map((project) => {
+              const mergedSrs = projectMerges?.[project.id] || [];
+              return (
+                <optgroup key={project.id} label={project.name}>
+                  <option value={project.sr}>{project.sr} · primary</option>
+                  {mergedSrs.map((sr) => (
+                    <option key={sr} value={sr}>{sr} · merged</option>
+                  ))}
+                </optgroup>
+              );
+            })}
           </select>
           <CaretDown size={14} />
         </label>
+        <span className="project-context-tag" title={currentProject ? `Routes to ${currentProject.subLabel}` : ""}>
+          <Users size={13} weight="duotone" />
+          {currentProject ? `${currentProject.subLabel} · ${currentProject.label}` : "Select project"}
+          {currentProject && !currentProject.primary && <i>merged</i>}
+        </span>
         <button
           className={`archive-toggle ${archivedVisible ? "active" : ""}`}
           onClick={() => setArchivedVisible(!archivedVisible)}
@@ -888,6 +916,16 @@ function parseDataPreview(dataSet) {
   }
 }
 
+function parseMergedSrs(json) {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string" && value) : [];
+  } catch {
+    return [];
+  }
+}
+
 function DataPreview({ dataSet, compact = false }) {
   const rows = parseDataPreview(dataSet);
   const columns = rows[0] ? Object.keys(rows[0]) : [];
@@ -930,12 +968,27 @@ function DataSetLabel({ dataSet, name }) {
   );
 }
 
-function CaseEditModal({ testCase, dataSets, onClose, onSave }) {
+function displayCaseId(testCase) {
+  return testCase.case_id || `TC-${testCase.id}`;
+}
+
+function caseDescription(testCase) {
+  return testCase.description || testCase.title || "";
+}
+
+function CaseEditModal({ testCase, suggestedCaseId, dataSets, onClose, onSave }) {
   const isNew = !testCase?.id;
-  const [form, setForm] = useState(testCase || {
-    title: "", case_type: "Web", priority: "P1", automation: "Automated", status: "Draft",
-    preconditions: "", test_steps: "", test_data: "", expected_result: "", test_set: "Not assigned",
-  });
+  const [form, setForm] = useState(() => ({
+    ...(testCase || {}),
+    case_id: testCase ? displayCaseId(testCase) : suggestedCaseId,
+    case_type: testCase?.case_type || "Web",
+    description: caseDescription(testCase || {}),
+    preconditions: testCase?.preconditions || "",
+    test_steps: testCase?.test_steps || "",
+    test_data: testCase?.test_data || "",
+    expected_result: testCase?.expected_result || "",
+    priority: testCase?.priority || "P1",
+  }));
   const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
   const selectedDataSet = dataSets.find((item) => item.name === form.test_data);
   return (
@@ -944,17 +997,10 @@ function CaseEditModal({ testCase, dataSets, onClose, onSave }) {
       <section className="modal-card case-editor-modal">
         <div className="modal-header"><div><span className="eyebrow">Test inventory</span><h2>{isNew ? "Create test case" : "Edit test case"}</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
         <div className="modal-form case-editor-form">
-          {!isNew && <label><span>Case ID</span><input value={`TC-${form.id}`} disabled /></label>}
-          <label><span>Description</span><input value={form.title} onChange={(event) => update("title", event.target.value)} placeholder="Describe the expected behavior" /></label>
-          <div className="form-row">
-            <label><span>Case type</span><select value={form.case_type} onChange={(event) => update("case_type", event.target.value)}><option>Web</option><option>API</option><option>Mobile</option></select></label>
-            <label><span>Priority</span><select value={form.priority} onChange={(event) => update("priority", event.target.value)}><option>P0</option><option>P1</option><option>P2</option></select></label>
-          </div>
-          <div className="form-row">
-            <label><span>Execution type</span><select value={form.automation} onChange={(event) => update("automation", event.target.value)}><option>Automated</option><option>Manual</option></select></label>
-            <label><span>Status</span><select value={form.status} onChange={(event) => update("status", event.target.value)}><option>Active</option><option>Draft</option></select></label>
-          </div>
-          <label><span>Preconditions</span><textarea value={form.preconditions || ""} onChange={(event) => update("preconditions", event.target.value)} placeholder="Required state before execution" /></label>
+          <label><span>Case ID</span><input value={form.case_id} onChange={(event) => update("case_id", event.target.value)} disabled={!isNew} placeholder="Unique test case ID" /></label>
+          <label><span>Case type</span><select value={form.case_type} onChange={(event) => update("case_type", event.target.value)}><option>Web</option><option>API</option><option>Mobile</option></select></label>
+          <label><span>Description</span><textarea value={form.description} onChange={(event) => update("description", event.target.value)} placeholder="Describe the test case" /></label>
+          <label><span>Pre-conditions</span><textarea value={form.preconditions} onChange={(event) => update("preconditions", event.target.value)} placeholder="Required state before execution" /></label>
           <label><span>Test steps</span><textarea value={form.test_steps || ""} onChange={(event) => update("test_steps", event.target.value)} placeholder="Enter one step per line" /></label>
           <label>
             <span>Test data</span>
@@ -968,9 +1014,9 @@ function CaseEditModal({ testCase, dataSets, onClose, onSave }) {
             )}
           </label>
           <label><span>Expected result</span><textarea value={form.expected_result || ""} onChange={(event) => update("expected_result", event.target.value)} placeholder="Expected outcome" /></label>
-          {!isNew && <div className="inline-notice"><Info size={17} /><span>Test Set membership is managed from Test sets → Manage cases. Editing this Case updates it everywhere it is reused.</span></div>}
+          <label><span>Priority</span><select value={form.priority} onChange={(event) => update("priority", event.target.value)}><option>P0</option><option>P1</option><option>P2</option></select></label>
         </div>
-        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!form.title.trim()} onClick={() => onSave(form)}><Check size={16} /> {isNew ? "Create case" : "Save changes"}</button></div>
+        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!form.case_id.trim() || !form.description.trim()} onClick={() => onSave(form)}><Check size={16} /> {isNew ? "Create case" : "Save changes"}</button></div>
       </section>
     </div>
   );
@@ -981,10 +1027,10 @@ function CaseDetailDrawer({ testCase, dataSet, onClose, onEdit }) {
     <div className="drawer-layer">
       <button className="drawer-backdrop" onClick={onClose} aria-label="Close test case details" />
       <aside className="run-drawer case-detail-drawer">
-        <div className="drawer-header"><div><span className="eyebrow">Test case details</span><h2>TC-{testCase.id}</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
-        <div className="drawer-title-row"><div><h3>{testCase.title}</h3><p>Updated {testCase.updated_at}</p></div><StatusPill>{testCase.status}</StatusPill></div>
-        <div className="detail-grid"><div><span>Type</span><strong>{testCase.case_type}</strong></div><div><span>Priority</span><strong>{testCase.priority}</strong></div><div><span>Automation</span><strong>{testCase.automation}</strong></div><div><span>Test set</span><strong>{testCase.test_set}</strong></div></div>
-        <section className="drawer-section"><span className="section-label"><Info size={15} /> Preconditions</span><p className="detail-copy">{testCase.preconditions || "No preconditions defined."}</p></section>
+        <div className="drawer-header"><div><span className="eyebrow">Test case details</span><h2>{displayCaseId(testCase)}</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
+        <div className="drawer-title-row"><div><h3>{caseDescription(testCase)}</h3><p>Updated {testCase.updated_at}</p></div></div>
+        <div className="detail-grid"><div><span>Case type</span><strong>{testCase.case_type}</strong></div><div><span>Priority</span><strong>{testCase.priority}</strong></div></div>
+        <section className="drawer-section"><span className="section-label"><Info size={15} /> Pre-conditions</span><p className="detail-copy">{testCase.preconditions || "No pre-conditions defined."}</p></section>
         <section className="drawer-section"><span className="section-label"><ListChecks size={15} /> Test steps</span><p className="detail-copy pre-line">{testCase.test_steps || "No test steps defined."}</p></section>
         <section className="drawer-section"><span className="section-label"><CheckCircle size={15} /> Expected result</span><p className="detail-copy">{testCase.expected_result || "No expected result defined."}</p></section>
         <section className="drawer-section linked-data-section">
@@ -997,25 +1043,160 @@ function CaseDetailDrawer({ testCase, dataSet, onClose, onEdit }) {
   );
 }
 
-function DataSetDrawer({ dataSet, cases, onClose, onBind }) {
+function DataSetDrawer({ dataSet, cases, onClose, onBind, onDelete, canEdit = true }) {
   const [selectedCaseIds, setSelectedCaseIds] = useState([]);
   const linkedCases = cases.filter((testCase) => testCase.test_data === dataSet.name);
   const toggleCase = (caseId) => setSelectedCaseIds((current) => current.includes(caseId) ? current.filter((id) => id !== caseId) : [...current, caseId]);
   return (
     <div className="drawer-layer">
-      <button className="drawer-backdrop" onClick={onClose} aria-label="Close test data details" />
+      <button className="drawer-backdrop" onClick={onClose} aria-label="Close data set details" />
       <aside className="set-cases-drawer data-set-drawer">
-        <div className="drawer-header"><div><span className="eyebrow">Test data details</span><h2>{dataSet.name}</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
+        <div className="drawer-header"><div><span className="eyebrow">Data set details</span><h2>{dataSet.name}</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
+        {!canEdit && <div className="inline-notice warning"><Lock size={17} /><span>This data set was created by another user. You have read-only access — editing and binding are disabled.</span></div>}
         <div className="detail-grid"><div><span>Source</span><strong>{dataSet.source_type}</strong></div><div><span>Status</span><strong>{dataSet.status}</strong></div><div><span>Workspace</span><strong>{dataSet.workspace}</strong></div><div><span>Created by</span><strong>{dataSet.created_by}</strong></div></div>
         <section className="drawer-section"><span className="section-label"><Database size={15} /> Data preview</span><DataPreview dataSet={dataSet} /></section>
         <section className="case-manager-section"><div className="case-manager-heading"><div><span className="panel-kicker">Current usage</span><h3>Bound test cases</h3></div><span className="subtle-count">{linkedCases.length} case(s)</span></div>
           <div className="case-manager-list">{linkedCases.map((testCase) => <div className="case-manager-row" key={testCase.id}><div><strong>{testCase.title}</strong><span>TC-{testCase.id} · {testCase.case_type}</span></div><StatusPill>{testCase.status}</StatusPill></div>)}{linkedCases.length === 0 && <div className="mini-empty"><Database size={20} /><span>Not bound to any test case yet.</span></div>}</div>
         </section>
-        <section className="case-manager-section"><div className="case-manager-heading"><div><span className="panel-kicker">Association</span><h3>Bind test cases</h3></div><span className="subtle-count">{selectedCaseIds.length} selected</span></div>
-          <div className="case-binding-list">{cases.map((testCase) => <label className="case-binding-row" key={testCase.id}><input type="checkbox" checked={selectedCaseIds.includes(testCase.id)} onChange={() => toggleCase(testCase.id)} /><span><strong>{testCase.title}</strong><small>TC-{testCase.id} · Current: {testCase.test_data || "Not assigned"}</small></span></label>)}</div>
-          <div className="drawer-actions"><button className="primary-button" disabled={!selectedCaseIds.length} onClick={() => onBind(dataSet.name, selectedCaseIds)}><Database size={16} /> Bind selected cases</button></div>
-        </section>
+        {canEdit ? (
+          <section className="case-manager-section"><div className="case-manager-heading"><div><span className="panel-kicker">Association</span><h3>Bind test cases</h3></div><span className="subtle-count">{selectedCaseIds.length} selected</span></div>
+            <div className="case-binding-list">{cases.map((testCase) => <label className="case-binding-row" key={testCase.id}><input type="checkbox" checked={selectedCaseIds.includes(testCase.id)} onChange={() => toggleCase(testCase.id)} /><span><strong>{testCase.title}</strong><small>TC-{testCase.id} · Current: {testCase.test_data || "Not assigned"}</small></span></label>)}</div>
+            <div className="drawer-actions">
+              <button className="danger-button" onClick={() => onDelete(dataSet.name)}><Trash size={16} /> Delete data set</button>
+              <button className="primary-button" disabled={!selectedCaseIds.length} onClick={() => onBind(dataSet.name, selectedCaseIds)}><Database size={16} /> Bind selected cases</button>
+            </div>
+          </section>
+        ) : (
+          <section className="case-manager-section"><div className="case-manager-heading"><div><span className="panel-kicker">Association</span><h3>Bound test cases</h3></div></div>
+            <div className="case-manager-list">{linkedCases.map((testCase) => <div className="case-manager-row" key={testCase.id}><div><strong>{testCase.title}</strong><span>TC-{testCase.id} · {testCase.case_type}</span></div><StatusPill>{testCase.status}</StatusPill></div>)}{linkedCases.length === 0 && <div className="mini-empty"><Database size={20} /><span>Not bound to any test case.</span></div>}</div>
+          </section>
+        )}
       </aside>
+    </div>
+  );
+}
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || "The import agent could not complete the request.");
+  return body;
+}
+
+function ImportAgentModal({ onClose, onImported }) {
+  const inputRef = useRef(null);
+  const [stage, setStage] = useState("upload");
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [messages, setMessages] = useState([]);
+
+  async function upload(file) {
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const result = await apiRequest("/api/imports/preview", { method: "POST", body: form });
+      setPreview(result);
+      setMessages([{ role: "agent", content: `I found ${result.cases.length} cases. Review the mapping below and tell me what to change before importing.` }]);
+      setStage("preview");
+    } catch (uploadError) {
+      setError(uploadError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmImport() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await apiRequest(`/api/imports/${preview.import_id}/confirm`, { method: "POST" });
+      onImported(result.cases);
+      onClose();
+    } catch (confirmError) {
+      setError(confirmError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendMessage(text = message) {
+    const outgoing = text.trim();
+    if (!outgoing || busy) return;
+    setMessage("");
+    setMessages((current) => [...current, { role: "user", content: outgoing }]);
+    setBusy(true);
+    setError("");
+    try {
+      const result = await apiRequest(`/api/imports/${preview.import_id}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: outgoing }),
+      });
+      if (result.cases.length) {
+        setPreview((current) => ({
+          ...current,
+          cases: current.cases.map((item) => result.cases.find((changed) => changed.import_order === item.import_order) ? {
+            ...item,
+            ...result.cases.find((changed) => changed.import_order === item.import_order),
+            description: result.cases.find((changed) => changed.import_order === item.import_order).title,
+          } : item),
+        }));
+      }
+      setMessages((current) => [...current, { role: "agent", content: result.message, changes: result.changes }]);
+    } catch (chatError) {
+      setError(chatError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-layer import-agent-layer">
+      <button className="modal-backdrop" onClick={onClose} aria-label="Close import agent" />
+      <section className="modal-card import-agent-modal">
+        <div className="modal-header import-agent-header">
+          <div><span className="eyebrow">LangChain import agent</span><h2>{stage === "upload" ? "Import test cases" : "Review and refine with Agent"}</h2></div>
+          <div className="agent-status"><Sparkle size={15} weight="fill" /> LangChain</div>
+          <IconButton label="Close" onClick={onClose}><X size={20} /></IconButton>
+        </div>
+
+        {stage === "upload" && <div className="import-upload-body">
+          <button className="import-dropzone" onClick={() => inputRef.current?.click()} disabled={busy}>
+            <span className="import-icon"><UploadSimple size={27} weight="duotone" /></span>
+            <strong>{busy ? "Agent is analyzing the workbook…" : "Choose an Excel or CSV file"}</strong>
+            <span>Every sheet is inspected. Unmatched columns are preserved as extra fields.</span>
+            <small>.xlsx · .xls · .xlsm · .csv</small>
+          </button>
+          <input ref={inputRef} type="file" accept=".xlsx,.xls,.xlsm,.csv" hidden onChange={(event) => upload(event.target.files?.[0])} />
+          <div className="import-capabilities"><span><CheckCircle size={16} /> Multi-sheet detection</span><span><CheckCircle size={16} /> Semantic field mapping</span><span><CheckCircle size={16} /> Source-row audit trail</span></div>
+        </div>}
+
+        {stage === "preview" && preview && <div className="import-preview-body">
+          <section className="import-summary-grid"><div><strong>{preview.cases.length}</strong><span>Cases detected</span></div><div><strong>{preview.sheets.filter((sheet) => sheet.status === "imported").length}</strong><span>Sheets imported</span></div><div><strong>{preview.cases.filter((item) => item.warnings.length).length}</strong><span>Need attention</span></div></section>
+          <section className="agent-workspace">
+            <div className="agent-explanation"><div className="agent-avatar"><Robot size={18} weight="duotone" /></div><div><div className="agent-workspace-title"><strong>How I handled this file</strong><span className="draft-badge">Draft</span></div>{preview.explanation.map((line) => <p key={line}>{line}</p>)}</div></div>
+            <div className="agent-refine-intro"><strong>Review or correct my work</strong><span>Tell me what to change below. Nothing is imported until you confirm.</span></div>
+            <div className="chat-messages">{messages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div><p>{item.content}</p>{item.changes?.map((change) => <small key={`${change.import_order}-${change.field}`}>Case {change.import_order} · {change.field}: {String(change.before ?? "—")} → {String(change.after ?? "—")}</small>)}</div></div>)}{busy && <div className="chat-message agent"><span><Robot size={16} /></span><div><p>Updating the import draft…</p></div></div>}</div>
+            <div className="chat-suggestions"><button onClick={() => sendMessage("请解释一下你是怎么处理这个文件的")}>Explain this import</button><button onClick={() => sendMessage("撤销")}>Undo last change</button></div>
+            <div className="chat-composer"><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder="在导入前修改，例如：第七条 case 的 user name 应该用 Lisa" /><button className="primary-button" disabled={!message.trim() || busy} onClick={() => sendMessage()}><PaperPlaneTilt size={17} weight="fill" /> Send</button></div>
+          </section>
+          <div className="sheet-report-list">{preview.sheets.map((sheet) => <details key={sheet.name} open={sheet.status === "imported"}>
+            <summary><span><FileText size={16} /><strong>{sheet.name}</strong></span><StatusPill tone={sheet.status === "imported" ? "success" : "neutral"}>{sheet.status === "imported" ? `${sheet.row_count} cases` : "Skipped"}</StatusPill></summary>
+            {sheet.status === "imported" ? <div className="mapping-chips">{sheet.mappings.map((mapping) => <span key={mapping.source_column}><b>{mapping.source_column}</b><CaretRight size={12} /><em>{mapping.target_field || "extra_fields"}</em><small>{Math.round(mapping.confidence * 100)}%</small></span>)}</div> : <p className="sheet-skip-reason">{sheet.reason}</p>}
+          </details>)}</div>
+          <div className="case-preview-table"><table><thead><tr><th>#</th><th>Source</th><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Extra fields</th></tr></thead><tbody>{preview.cases.slice(0, 12).map((item) => <tr key={`${item.source_sheet}-${item.source_row}`}><td>{item.import_order}</td><td>{item.source_sheet} · {item.source_row}</td><td>{item.case_id}</td><td>{item.description || "—"}</td><td>{item.case_type}</td><td>{item.priority}</td><td>{Object.keys(item.extra_fields).length}</td></tr>)}</tbody></table></div>
+        </div>}
+
+        {error && <div className="import-error"><Warning size={17} /><span>{error}</span></div>}
+        <div className="modal-actions import-agent-actions">
+          {stage === "preview" && <><button className="secondary-button" disabled={busy} onClick={() => { setStage("upload"); setPreview(null); setMessages([]); }}>Choose another file</button><button className="primary-button" disabled={busy || !preview.cases.length} onClick={confirmImport}><Check size={16} /> {busy ? "Importing reviewed draft…" : `Confirm and import ${preview.cases.length} cases`}</button></>}
+        </div>
+      </section>
     </div>
   );
 }
@@ -1027,10 +1208,11 @@ function CasesPage({ cases, setCases, dataSets, onRun, onToast }) {
   const [editingCase, setEditingCase] = useState(null);
   const [creatingCase, setCreatingCase] = useState(false);
   const [viewingCase, setViewingCase] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [selectedCaseIds, setSelectedCaseIds] = useState([]);
   const [selectedDataSet, setSelectedDataSet] = useState("");
   const filtered = cases.filter((testCase) =>
-    (`${testCase.id} ${testCase.title}`).toLowerCase().includes(queryText.toLowerCase()) && (type === "All types" || testCase.case_type === type),
+    (`${testCase.id} ${testCase.case_id || ""} ${testCase.title}`).toLowerCase().includes(queryText.toLowerCase()) && (type === "All types" || testCase.case_type === type),
   );
   const allVisibleSelected = filtered.length > 0 && filtered.every((testCase) => selectedCaseIds.includes(testCase.id));
   const toggleCase = (caseId) => setSelectedCaseIds((current) => current.includes(caseId) ? current.filter((id) => id !== caseId) : [...current, caseId]);
@@ -1043,27 +1225,38 @@ function CasesPage({ cases, setCases, dataSets, onRun, onToast }) {
     setSelectedDataSet("");
   }
   function saveCase(form) {
+    const normalized = { ...form, title: form.description };
     if (form.id) {
-      setCases((current) => current.map((item) => item.id === form.id ? { ...item, ...form, updated_at: "11 Aug 2026" } : item));
+      setCases((current) => current.map((item) => item.id === form.id ? { ...item, ...normalized, updated_at: "11 Aug 2026" } : item));
       onToast(`TC-${form.id} saved. Reused instances were updated.`);
     } else {
       const id = Math.max(...cases.map((item) => item.id)) + 1;
-      setCases((current) => [...current, { ...form, id, updated_at: "11 Aug 2026" }]);
-      onToast(`TC-${id} created as ${form.status}.`);
+      setCases((current) => [...current, { ...normalized, id, automation: "Manual", status: "Draft", test_set: "Not assigned", updated_at: "11 Aug 2026" }]);
+      onToast(`${form.case_id} created.`);
     }
     setEditingCase(null);
     setCreatingCase(false);
   }
   function duplicateCase(testCase) {
     const id = Math.max(...cases.map((item) => item.id)) + 1;
-    setCases((current) => [...current, { ...testCase, id, title: `${testCase.title} — Copy`, status: "Draft", updated_at: "11 Aug 2026" }]);
+    const description = `${caseDescription(testCase)} — Copy`;
+    setCases((current) => [...current, { ...testCase, id, case_id: `TC-${id}`, title: description, description, status: "Draft", updated_at: "11 Aug 2026" }]);
     setMenuCaseId(null);
     onToast(`TC-${testCase.id} duplicated as draft TC-${id}.`);
+  }
+  function mergeImported(importedCases, updatesOnly = false) {
+    setCases((current) => {
+      const findMatch = (item) => importedCases.find((candidate) => candidate.id === item.id);
+      if (updatesOnly) return current.map((item) => findMatch(item) ? { ...item, ...findMatch(item), extra_fields: { ...(item.extra_fields || {}), ...(findMatch(item).extra_fields || {}) } } : item);
+      const importedIds = new Set(importedCases.map((item) => item.id));
+      return [...current.filter((item) => !importedIds.has(item.id)), ...importedCases];
+    });
+    if (!updatesOnly) onToast(`${importedCases.length} test cases imported with source audit data.`);
   }
   return (
     <>
       <PageHeader eyebrow="Test inventory" title="Test cases" description="Search, maintain and execute the reusable test inventory for this project."
-        actions={<><button className="secondary-button"><UploadSimple size={17} /> Upload cases</button><button className="primary-button" onClick={() => setCreatingCase(true)}><Plus size={17} /> New test case</button></>} />
+        actions={<><button className="secondary-button" onClick={() => setImportOpen(true)}><UploadSimple size={17} /> Upload cases</button><button className="primary-button" onClick={() => setCreatingCase(true)}><Plus size={17} /> New test case</button></>} />
       <div className="filter-bar">
         <label className="search-field"><MagnifyingGlass size={18} /><input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="Search ID or description" /></label>
         <select className="filter-select" value={type} onChange={(event) => setType(event.target.value)}><option>All types</option><option>Web</option><option>API</option><option>Mobile</option></select>
@@ -1073,60 +1266,84 @@ function CasesPage({ cases, setCases, dataSets, onRun, onToast }) {
       <section className="panel flush-panel cases-panel">
         <div className="table-wrap">
           <table className="data-table selectable-table">
-            <thead><tr><th><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible} aria-label="Select all visible test cases" /></th><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Test data</th><th>Automation</th><th>Status</th><th /></tr></thead>
+            <thead><tr><th><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible} aria-label="Select all visible test cases" /></th><th>Case ID</th><th>Case type</th><th>Description</th><th>Pre-conditions</th><th>Test steps</th><th>Test data</th><th>Expected result</th><th>Priority</th><th /></tr></thead>
             <tbody>{filtered.map((testCase) => (
               <tr key={testCase.id}>
-                <td><input type="checkbox" checked={selectedCaseIds.includes(testCase.id)} onChange={() => toggleCase(testCase.id)} aria-label={`Select TC-${testCase.id}`} /></td>
-                <td><button className="table-link" onClick={() => setViewingCase(testCase)}>TC-{testCase.id}</button></td>
-                <td><strong className="cell-primary">{testCase.title}</strong><span className="cell-secondary">Updated {testCase.updated_at}</span></td>
-                <td>{testCase.case_type}</td><td><span className={`priority ${testCase.priority.toLowerCase()}`}>{testCase.priority}</span></td><td><span className="data-binding-cell"><DataSetLabel dataSet={dataSets.find((item) => item.name === testCase.test_data)} name={testCase.test_data} /></span></td><td>{testCase.automation}</td><td><StatusPill>{testCase.status}</StatusPill></td>
-                <td><div className="row-actions"><div className="action-menu-wrap"><IconButton label={`More actions for TC-${testCase.id}`} onClick={() => setMenuCaseId((current) => current === testCase.id ? null : testCase.id)}><DotsThree size={19} /></IconButton>{menuCaseId === testCase.id && <div className="action-menu"><button onClick={() => { setEditingCase(testCase); setMenuCaseId(null); }}><PencilSimple size={16} /> Edit case</button><button onClick={() => duplicateCase(testCase)}><Copy size={16} /> Duplicate case</button></div>}</div><button className="primary-button compact" onClick={() => onRun(testCase.title, "Test case")}><Play size={14} weight="fill" /> Run</button></div></td>
+                <td><input type="checkbox" checked={selectedCaseIds.includes(testCase.id)} onChange={() => toggleCase(testCase.id)} aria-label={`Select ${displayCaseId(testCase)}`} /></td>
+                <td><button className="table-link" onClick={() => setViewingCase(testCase)}>{displayCaseId(testCase)}</button></td>
+                <td>{testCase.case_type}</td>
+                <td><strong className="cell-primary">{caseDescription(testCase)}</strong><span className="cell-secondary">Updated {testCase.updated_at}</span></td>
+                <td className="case-text-cell">{testCase.preconditions || "—"}</td>
+                <td className="case-text-cell pre-line">{testCase.test_steps || "—"}</td>
+                <td><span className="data-binding-cell"><DataSetLabel dataSet={dataSets.find((item) => item.name === testCase.test_data)} name={testCase.test_data} /></span></td>
+                <td className="case-text-cell">{testCase.expected_result || "—"}</td>
+                <td><span className={`priority ${testCase.priority.toLowerCase()}`}>{testCase.priority}</span></td>
+                <td><div className="row-actions"><div className="action-menu-wrap"><IconButton label={`More actions for ${displayCaseId(testCase)}`} onClick={() => setMenuCaseId((current) => current === testCase.id ? null : testCase.id)}><DotsThree size={19} /></IconButton>{menuCaseId === testCase.id && <div className="action-menu"><button onClick={() => { setEditingCase(testCase); setMenuCaseId(null); }}><PencilSimple size={16} /> Edit case</button><button onClick={() => duplicateCase(testCase)}><Copy size={16} /> Duplicate case</button></div>}</div><button className="primary-button compact" onClick={() => onRun(caseDescription(testCase), "Test case")}><Play size={14} weight="fill" /> Run</button></div></td>
               </tr>
             ))}</tbody>
           </table>
         </div>
       </section>
       {viewingCase && <CaseDetailDrawer testCase={cases.find((item) => item.id === viewingCase.id) || viewingCase} dataSet={dataSets.find((item) => item.name === (cases.find((item) => item.id === viewingCase.id) || viewingCase).test_data)} onClose={() => setViewingCase(null)} onEdit={() => { setEditingCase(cases.find((item) => item.id === viewingCase.id) || viewingCase); setViewingCase(null); }} />}
-      {(editingCase || creatingCase) && <CaseEditModal testCase={editingCase} dataSets={dataSets} onClose={() => { setEditingCase(null); setCreatingCase(false); }} onSave={saveCase} />}
+      {(editingCase || creatingCase) && <CaseEditModal testCase={editingCase} suggestedCaseId={`TC-${Math.max(...cases.map((item) => item.id)) + 1}`} dataSets={dataSets} onClose={() => { setEditingCase(null); setCreatingCase(false); }} onSave={saveCase} />}
+      {importOpen && <ImportAgentModal onClose={() => setImportOpen(false)} onImported={mergeImported} />}
     </>
   );
 }
 
 function DataPage({ dataSets, cases, setCases, onToast }) {
-  const [workspace, setWorkspace] = useState("Team Workspace");
+  const [tab, setTab] = useState("My data");
   const [queryText, setQueryText] = useState("");
   const [selectedData, setSelectedData] = useState(null);
-  const counts = useMemo(() => Object.fromEntries(["My Workspace", "Team Workspace", "Published"].map((name) => [name, dataSets.filter((item) => item.workspace === name).length])), [dataSets]);
-  const filtered = dataSets.filter((item) => item.workspace === workspace && item.name.toLowerCase().includes(queryText.toLowerCase()));
+  const myData = useMemo(() => dataSets.filter((item) => item.created_by === CURRENT_USER), [dataSets]);
+  const counts = useMemo(() => ({
+    "My data": myData.length,
+    "All data": dataSets.length,
+  }), [myData, dataSets]);
+  const filtered = (tab === "My data" ? myData : dataSets).filter((item) => item.name.toLowerCase().includes(queryText.toLowerCase()));
   function bindCases(dataSetName, caseIds) {
     setCases((current) => current.map((testCase) => caseIds.includes(testCase.id) ? { ...testCase, test_data: dataSetName, updated_at: "11 Aug 2026" } : testCase));
     onToast(`${dataSetName} bound to ${caseIds.length} test case(s).`);
     setSelectedData(null);
   }
+  function deleteDataSet(dataSetName) {
+    onToast(`${dataSetName} deleted.`);
+    setSelectedData(null);
+  }
   return (
     <>
-      <PageHeader eyebrow="Reusable input" title="Test data" description="Import, publish and reuse data sets across test cases without duplicating fixtures."
+      <PageHeader eyebrow="Reusable input" title="My data" description="Import, manage and reuse data sets across test cases without duplicating fixtures."
         actions={<button className="primary-button" onClick={() => onToast("Import panel opened. Choose a file to create a new data set.")}><UploadSimple size={17} /> Import data set</button>} />
       <div className="workspace-tabs">
-        {["My Workspace", "Team Workspace", "Published"].map((item) => (
-          <button key={item} className={workspace === item ? "active" : ""} onClick={() => setWorkspace(item)}>{item}<span>{counts[item]}</span></button>
+        {["My data", "All data"].map((item) => (
+          <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}<span>{counts[item]}</span></button>
         ))}
       </div>
       <div className="filter-bar data-filter"><label className="search-field"><MagnifyingGlass size={18} /><input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="Search data sets" /></label><span>Showing {filtered.length} data set(s)</span></div>
       <div className="data-card-grid">
-        {filtered.map((item) => (
-          <article className="data-card" key={item.id}>
-            <div className="data-card-header"><div className="data-set-icon"><Database size={19} weight="duotone" /></div><IconButton label="Data set actions"><DotsThree size={19} /></IconButton></div>
-            <h2>{item.name}</h2>
-            <div className="data-meta"><span>Source type</span><strong>{item.source_type}</strong><span>Updated</span><strong>{item.updated_at}</strong></div>
-            <StatusPill>{item.status}</StatusPill>
-            <div className="data-card-footer"><div><span>Created by</span><strong>{item.created_by}</strong></div><div className="data-points"><strong>{item.data_points}</strong><span>Data points</span></div></div>
-            <button className="card-hit" onClick={() => setSelectedData(item)} aria-label={`Open ${item.name}`} />
-          </article>
-        ))}
-        {filtered.length === 0 && <EmptyState title="No data sets here yet" detail="Import a data set or publish one from another workspace." />}
+        {filtered.map((item) => {
+          const canEdit = item.created_by === CURRENT_USER;
+          return (
+            <article className={`data-card ${!canEdit ? "read-only" : ""}`} key={item.id}>
+              <div className="data-card-header">
+                <div className="data-set-icon"><Database size={19} weight="duotone" /></div>
+                <div className="data-card-actions">
+                  {!canEdit && <span className="read-only-badge" title="You can only edit data sets you created"><Lock size={14} /> Read-only</span>}
+                  {canEdit && <IconButton label="Delete data set" className="danger-hover" onClick={() => deleteDataSet(item.name)}><Trash size={17} /></IconButton>}
+                  <IconButton label="Data set actions"><DotsThree size={19} /></IconButton>
+                </div>
+              </div>
+              <h2>{item.name}</h2>
+              <div className="data-meta"><span>Source type</span><strong>{item.source_type}</strong><span>Updated</span><strong>{item.updated_at}</strong></div>
+              <StatusPill>{item.status}</StatusPill>
+              <div className="data-card-footer"><div><span>Created by</span><strong>{item.created_by}</strong></div><div className="data-points"><strong>{item.data_points}</strong><span>Data points</span></div></div>
+              <button className="card-hit" onClick={() => setSelectedData(item)} aria-label={`Open ${item.name}`} />
+            </article>
+          );
+        })}
+        {filtered.length === 0 && <EmptyState title="No data sets here yet" detail={tab === "My data" ? "Import a data set to get started." : "No data sets match your search."} />}
       </div>
-      {selectedData && <DataSetDrawer dataSet={selectedData} cases={cases} onClose={() => setSelectedData(null)} onBind={bindCases} />}
+      {selectedData && <DataSetDrawer dataSet={selectedData} cases={cases} canEdit={selectedData.created_by === CURRENT_USER} onClose={() => setSelectedData(null)} onBind={bindCases} onDelete={deleteDataSet} />}
     </>
   );
 }
@@ -1206,27 +1423,164 @@ function SecurityPage({ securityRules, onToast }) {
   );
 }
 
-function SettingsPage({ project, members, onToast }) {
+function SettingsPage({ project, projects, projectMerges, setProjectMerges, onToast }) {
   const [archivalOpen, setArchivalOpen] = useState(false);
+  const [newSrInput, setNewSrInput] = useState("");
+  const [owners, setOwners] = useState([project.owner]);
+  const [editingOwners, setEditingOwners] = useState(false);
+  const [newOwner, setNewOwner] = useState("");
+  const mergedSrs = projectMerges[project.id] || [];
+
+  function updateMergedSrs(next) {
+    setProjectMerges((current) => ({ ...current, [project.id]: next }));
+  }
+
+  function addMergedSr(sr) {
+    const trimmed = sr.trim();
+    if (!trimmed) return;
+    if (trimmed === project.sr) {
+      onToast(`${trimmed} is already the primary SR for this project.`);
+      return;
+    }
+    if (mergedSrs.includes(trimmed)) {
+      onToast(`${trimmed} is already merged into this project.`);
+      return;
+    }
+    const owner = projects.find((item) => item.sr === trimmed);
+    if (owner && owner.id !== project.id) {
+      onToast(`${trimmed} is the primary SR for ${owner.name}. Remove it there first or use a new SR ID.`);
+      return;
+    }
+    updateMergedSrs([...mergedSrs, trimmed]);
+    onToast(`${trimmed} now routes to ${project.name} from the project selector.`);
+  }
+
+  function removeMergedSr(sr) {
+    updateMergedSrs(mergedSrs.filter((item) => item !== sr));
+    onToast(`${sr} is no longer merged into ${project.name}.`);
+  }
+
+  function addOwner() {
+    const value = newOwner.trim();
+    if (!value) return;
+    if (owners.includes(value)) {
+      onToast(`${value} is already an owner.`);
+      return;
+    }
+    setOwners([...owners, value]);
+    setNewOwner("");
+    onToast(`${value} added as project owner.`);
+  }
+
+  function removeOwner(name) {
+    if (owners.length <= 1) {
+      onToast("At least one owner is required.");
+      return;
+    }
+    setOwners(owners.filter((item) => item !== name));
+    onToast(`${name} removed from owners.`);
+  }
+
+  function handleAddFromInput() {
+    const value = newSrInput.trim();
+    if (!value) return;
+    addMergedSr(value);
+    setNewSrInput("");
+  }
+
+  const availableSrSuggestions = projects
+    .filter((item) => item.id !== project.id)
+    .flatMap((item) => {
+      const aliases = projectMerges[item.id] || [];
+      return [{ sr: item.sr, projectName: item.name, primary: true }, ...aliases.map((sr) => ({ sr, projectName: item.name, primary: false }))];
+    })
+    .filter(({ sr }) => !mergedSrs.includes(sr) && sr !== project.sr);
+
   return (
     <>
-      <PageHeader eyebrow="Project administration" title="Project settings" description="Project identity, SR ownership and team access for Digital Claims Modernization."
+      <PageHeader eyebrow="Project administration" title="Project settings" description={`Project identity, SR ownership and merged SR routing for ${project.name}.`}
         actions={<button className="secondary-button" onClick={() => onToast("Project changes saved.")}><Check size={17} /> Save changes</button>} />
       <div className="settings-layout">
-        <section className="panel settings-panel">
+        <section className="panel settings-panel" key={project.id}>
           <div className="panel-heading"><div><span className="panel-kicker">Project info</span><h2>Identity & ownership</h2></div><StatusPill>{project.status}</StatusPill></div>
           <div className="settings-form">
             <label><span>Project name</span><input defaultValue={project.name} /></label>
             <label><span>Description</span><textarea defaultValue={project.description} /></label>
             <div className="form-row"><label><span>BU</span><input defaultValue={project.bu} disabled /></label><label><span>SR</span><input defaultValue={project.sr} disabled /></label></div>
-            <label><span>Project owner</span><div className="owner-control"><div className="avatar">MC</div><strong>{project.owner}</strong><button className="text-button" onClick={() => onToast("Owner transfer workflow opened.")}>Transfer ownership</button></div></label>
+            <label><span>Project owners</span>
+              <div className="owner-list">
+                {owners.map((name) => (
+                  <div className="owner-row" key={name}>
+                    <div className="avatar">{name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div>
+                    <strong>{name}</strong>
+                    {editingOwners && owners.length > 1 && (
+                      <button className="danger-text-button" onClick={() => removeOwner(name)} aria-label={`Remove ${name}`}><X size={14} /> Remove</button>
+                    )}
+                  </div>
+                ))}
+                {editingOwners && (
+                  <div className="owner-add-row">
+                    <input value={newOwner} onChange={(event) => setNewOwner(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addOwner(); }} placeholder="Enter owner name" />
+                    <button className="primary-button compact" disabled={!newOwner.trim()} onClick={addOwner}><Plus size={14} /> Add</button>
+                  </div>
+                )}
+              </div>
+              <button className="text-button" onClick={() => { setEditingOwners(!editingOwners); setNewOwner(""); }}>{editingOwners ? "Done" : "Edit owner"}</button>
+            </label>
           </div>
         </section>
-        <section className="panel members-panel">
-          <div className="panel-heading"><div><span className="panel-kicker">Access</span><h2>Project members</h2></div><button className="secondary-button compact" onClick={() => onToast("Member search opened.")}><Plus size={16} /> Add member</button></div>
-          <div className="member-list">{members.map((member) => (
-            <div className="member-row" key={member.id}><div className="avatar alt">{member.name.split(" ").map((part) => part[0]).join("")}</div><div><strong>{member.name}</strong><span>{member.email}</span></div><StatusPill tone={member.role === "Owner" ? "info" : "neutral"}>{member.role}</StatusPill><IconButton label="Member actions"><DotsThree size={18} /></IconButton></div>
-          ))}</div>
+        <section className="panel merge-panel">
+          <div className="panel-heading"><div><span className="panel-kicker">SR routing</span><h2>Merge SR</h2></div><StatusPill>{mergedSrs.length} merged</StatusPill></div>
+          <div className="merge-summary">
+            <Users size={18} weight="duotone" />
+            <span>Select any merged SR from the top project selector and it routes here. The primary SR <strong>{project.sr}</strong> is always routed to {project.name}.</span>
+          </div>
+          <div className="merge-section">
+            <div className="merge-section-heading"><strong>Primary SR</strong><span>Always routes to this project</span></div>
+            <div className="merged-sr-row primary">
+              <div className="merged-sr-meta"><strong>{project.sr}</strong><span>Project identifier · read-only</span></div>
+              <StatusPill tone="info">Primary</StatusPill>
+            </div>
+          </div>
+          <div className="merge-section">
+            <div className="merge-section-heading"><strong>Merged SRs</strong><span>{mergedSrs.length} additional SR{mergedSrs.length === 1 ? "" : "s"} route to this project</span></div>
+            {mergedSrs.length > 0 ? (
+              <div className="merged-sr-list">
+                {mergedSrs.map((sr) => (
+                  <div className="merged-sr-row" key={sr}>
+                    <div className="merged-sr-meta"><strong>{sr}</strong><span>Alias for {project.name}</span></div>
+                    <div className="merged-sr-actions">
+                      <StatusPill tone="success">Merged</StatusPill>
+                      <button className="danger-text-button" onClick={() => removeMergedSr(sr)} aria-label={`Unmerge ${sr}`}><X size={14} /> Unmerge</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="merge-empty"><Info size={18} /><span>No merged SRs yet. Add one below.</span></div>
+            )}
+          </div>
+          <div className="merge-section">
+            <div className="merge-section-heading"><strong>Add SR</strong><span>Type a new SR ID or pick one from another project</span></div>
+            <div className="merge-add-row">
+              <label className="search-field full">
+                <Key size={16} />
+                <input value={newSrInput} onChange={(event) => setNewSrInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") handleAddFromInput(); }} placeholder="e.g. SR-2501" />
+              </label>
+              <button className="primary-button compact" disabled={!newSrInput.trim()} onClick={handleAddFromInput}><Plus size={14} /> Merge SR</button>
+            </div>
+            {availableSrSuggestions.length > 0 && (
+              <div className="available-sr-list">
+                <div className="available-sr-heading"><span>Available from other projects</span><span>{availableSrSuggestions.length} suggestion{availableSrSuggestions.length === 1 ? "" : "s"}</span></div>
+                {availableSrSuggestions.map(({ sr, projectName, primary }) => (
+                  <div className="available-sr-row" key={`${projectName}-${sr}`}>
+                    <div className="available-sr-meta"><strong>{sr}</strong><span>{primary ? "Primary" : "Merged"} · {projectName}</span></div>
+                    <button className="secondary-button compact" onClick={() => addMergedSr(sr)}><Plus size={13} /> Merge</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </section>
       </div>
       <section className="danger-zone">
@@ -1290,6 +1644,8 @@ export function App() {
   const [toast, setToast] = useState("");
   const [setCaseMemberships, setSetCaseMemberships] = useState(null);
   const [caseRecords, setCaseRecords] = useState(null);
+  const [projectMerges, setProjectMerges] = useState(null);
+  const [selectedSr, setSelectedSr] = useState("");
 
   useEffect(() => {
     if (!data || setCaseMemberships) return;
@@ -1301,12 +1657,39 @@ export function App() {
   }, [data, caseRecords]);
 
   useEffect(() => {
+    if (!data || projectMerges) return;
+    setProjectMerges(Object.fromEntries(data.projects.map((project) => [project.id, parseMergedSrs(project.merged_srs)])));
+  }, [data, projectMerges]);
+
+  useEffect(() => {
+    if (!data || selectedSr || !projectMerges) return;
+    setSelectedSr(data.projects[0]?.sr || "");
+  }, [data, projectMerges, selectedSr]);
+
+  useEffect(() => {
     if (!toast) return undefined;
     const timer = setTimeout(() => setToast(""), 3500);
     return () => clearTimeout(timer);
   }, [toast]);
 
-  if (!data || !setCaseMemberships || !caseRecords) return <LoadingScreen error={error} />;
+  if (!data || !setCaseMemberships || !caseRecords || !projectMerges) return <LoadingScreen error={error} />;
+
+  const resolveProject = (sr) => {
+    if (!sr) return null;
+    return (
+      data.projects.find((project) => project.sr === sr) ||
+      data.projects.find((project) => (projectMerges[project.id] || []).includes(sr)) ||
+      null
+    );
+  };
+  const currentProject = resolveProject(selectedSr) || data.projects[0];
+  const handleSelectSr = (sr) => {
+    setSelectedSr(sr);
+    const resolved = resolveProject(sr);
+    if (resolved && resolved.id !== data.projects[0].id) {
+      // No-op for now; future pages could react to project changes.
+    }
+  };
 
   const pageContent = {
     dashboard: <Dashboard data={data} onViewRuns={() => setPage("runs")} />,
@@ -1317,14 +1700,14 @@ export function App() {
     data: <DataPage dataSets={data.dataSets} cases={caseRecords} setCases={setCaseRecords} onToast={setToast} />,
     apps: <AppsPage applications={data.applications} onToast={setToast} />,
     security: <SecurityPage securityRules={data.securityRules} onToast={setToast} />,
-    settings: <SettingsPage project={data.projects[0]} members={data.members} onToast={setToast} />,
+    settings: <SettingsPage key={currentProject.id} project={currentProject} projects={data.projects} projectMerges={projectMerges} setProjectMerges={setProjectMerges} onToast={setToast} />,
   }[page];
 
   return (
     <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`}>
       <Sidebar page={page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} />
       <div className="workspace">
-        <Topbar projects={data.projects} archivedVisible={archivedVisible} setArchivedVisible={setArchivedVisible} />
+        <Topbar projects={data.projects} projectMerges={projectMerges} selectedSr={selectedSr} onSelectSr={handleSelectSr} archivedVisible={archivedVisible} setArchivedVisible={setArchivedVisible} />
         <main className="page-content">{pageContent}</main>
       </div>
       {runModal && <RunModal target={runModal.target} type={runModal.type} applications={data.applications} onClose={() => setRunModal(null)} onStart={() => { setRunModal(null); setToast("Run R-4823 started. 12 case tasks were added to the queue."); setPage("runs"); }} />}

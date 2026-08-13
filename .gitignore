@@ -1,4 +1,7 @@
 node_modules/
+.venv/
+.venv-python39-incompatible/
+backend/data/
 dist/
 .DS_Store
 *.log

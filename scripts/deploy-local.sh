@@ -6,6 +6,8 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${PROJECT_DIR}/.local-deploy"
 PID_FILE="${STATE_DIR}/server.pid"
 LOG_FILE="${STATE_DIR}/server.log"
+AGENT_PID_FILE="${STATE_DIR}/agent.pid"
+AGENT_LOG_FILE="${STATE_DIR}/agent.log"
 DEPLOY_HOST="${DEPLOY_HOST:-0.0.0.0}"
 DEPLOY_PORT="${DEPLOY_PORT:-4173}"
 COMMAND="${1:-start}"
@@ -15,6 +17,10 @@ is_running() {
 }
 
 stop_server() {
+  if [[ -f "${AGENT_PID_FILE}" ]] && kill -0 "$(<"${AGENT_PID_FILE}")" 2>/dev/null; then
+    kill "$(<"${AGENT_PID_FILE}")"
+    rm -f "${AGENT_PID_FILE}"
+  fi
   if ! is_running; then
     rm -f "${PID_FILE}"
     echo "QA Orbit local deployment is not running."
@@ -51,6 +57,28 @@ start_server() {
   mkdir -p "${STATE_DIR}"
   cd "${PROJECT_DIR}"
 
+  if [[ ! -x "${PROJECT_DIR}/.venv/bin/python" ]]; then
+    command -v python3 >/dev/null 2>&1 || { echo "Python 3 is required for the LangChain import agent." >&2; exit 1; }
+    python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' || { echo "Python 3.11 or newer is required for LangChain." >&2; exit 1; }
+    python3 -m venv "${PROJECT_DIR}/.venv"
+  fi
+  echo "Installing LangChain agent dependencies..."
+  "${PROJECT_DIR}/.venv/bin/pip" install --quiet -r "${PROJECT_DIR}/backend/requirements.txt"
+  echo "Starting LangChain import agent on 127.0.0.1:8000..."
+  PYTHONPATH="${PROJECT_DIR}/backend" nohup "${PROJECT_DIR}/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 >"${AGENT_LOG_FILE}" 2>&1 &
+  echo "$!" >"${AGENT_PID_FILE}"
+  for _ in {1..30}; do
+    if curl --silent --fail "http://127.0.0.1:8000/api/health" >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "$(<"${AGENT_PID_FILE}")" 2>/dev/null; then
+      echo "LangChain import agent failed to start." >&2
+      tail -20 "${AGENT_LOG_FILE}" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
+
   echo "Installing locked dependencies..."
   npm ci
 
@@ -68,6 +96,7 @@ start_server() {
       echo "Open http://localhost:${DEPLOY_PORT}/"
       echo "PID: ${server_pid}"
       echo "Log: ${LOG_FILE}"
+      echo "Agent log: ${AGENT_LOG_FILE}"
       return
     fi
     if ! kill -0 "${server_pid}" 2>/dev/null; then

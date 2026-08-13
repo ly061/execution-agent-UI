@@ -12,8 +12,16 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     allowedHosts: ["terminal.local"],
+    proxy: {
+      "/api": "http://127.0.0.1:8000",
+    },
     warmup: {
       clientFiles: ["./src/main.jsx"],
+    },
+  },
+  preview: {
+    proxy: {
+      "/api": "http://127.0.0.1:8000",
     },
   },
   plugins: [react()],

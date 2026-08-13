@@ -21,7 +21,8 @@ cur.executescript(
       bu TEXT NOT NULL,
       owner TEXT NOT NULL,
       status TEXT NOT NULL,
-      description TEXT
+      description TEXT,
+      merged_srs TEXT
     );
 
     CREATE TABLE plans (
@@ -170,10 +171,10 @@ cur.executescript(
     """
 )
 
-cur.executemany("INSERT INTO projects VALUES (?,?,?,?,?,?,?)", [
-    (1, "Digital Claims Modernization", "SR-2451", "MY", "Maya Chen", "Active", "End-to-end quality workspace for the MY claims modernization release train."),
-    (2, "Partner Onboarding Revamp", "SR-2478", "MY", "Leo Wong", "Active", "Partner onboarding automation and regression coverage."),
-    (3, "Legacy Billing Sunset", "SR-2399", "MY", "Nora Lim", "Archived", "Historical project retained for audit and result lookup."),
+cur.executemany("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?)", [
+    (1, "Digital Claims Modernization", "SR-2451", "MY", "Maya Chen", "Active", "End-to-end quality workspace for the MY claims modernization release train.", '["SR-2480", "SR-2492"]'),
+    (2, "Partner Onboarding Revamp", "SR-2478", "MY", "Leo Wong", "Active", "Partner onboarding automation and regression coverage.", None),
+    (3, "Legacy Billing Sunset", "SR-2399", "MY", "Nora Lim", "Archived", "Historical project retained for audit and result lookup.", None),
 ])
 
 cur.executemany("INSERT INTO plans VALUES (?,?,?,?,?,?,?,?,?,?)", [
