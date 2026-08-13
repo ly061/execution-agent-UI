@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import initSqlJs from "sql.js";
+import * as XLSX from "xlsx";
 import {
   Pulse,
   AppWindow,
@@ -76,9 +77,8 @@ const NAV = [
 
 const CURRENT_USER = "maya.chen@demo.com";
 const API_KEY_STORAGE = "qa-orbit-deepseek-api-key";
-const API_ORIGIN = window.location.hostname === "ly061.github.io"
-  ? "https://test-management-prototype.poetic-cod-6823.chatgpt.site"
-  : "";
+const IS_GITHUB_PAGES = window.location.hostname === "ly061.github.io";
+const API_ORIGIN = "";
 
 const assetUrl = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 
@@ -1090,11 +1090,101 @@ async function apiRequest(path, options = {}) {
   return body;
 }
 
+const BROWSER_FIELD_ALIASES = {
+  case_id: ["case id", "caseid", "test case id", "用例id", "用例编号", "编号"],
+  case_type: ["case type", "type", "platform", "channel", "用例类型", "类型", "端"],
+  description: ["description", "title", "case name", "test case", "scenario", "scenario name", "summary", "用例描述", "描述", "用例名称", "场景"],
+  preconditions: ["pre conditions", "preconditions", "pre condition", "prerequisite", "前置条件", "执行前置条件"],
+  test_steps: ["test steps", "steps", "step", "actions", "procedure", "测试步骤", "操作步骤", "步骤"],
+  test_data: ["test data", "data", "data set", "dataset", "测试数据", "数据集"],
+  expected_result: ["expected result", "expected results", "expected", "outcome", "assertion", "预期结果", "期望结果"],
+  priority: ["priority", "severity", "importance", "优先级", "重要级别"],
+};
+
+const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replaceAll("_", " ").replace(/[\s\-–—/:()]+/g, " ");
+
+function parseWorkbookInBrowser(filename, bytes) {
+  const workbook = XLSX.read(bytes, { type: "array" });
+  const cases = [];
+  const sheets = [];
+  let generated = 1;
+  for (const sheetName of workbook.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false });
+    const score = (row) => row.reduce((total, value) => total + (Object.values(BROWSER_FIELD_ALIASES).some((aliases) => aliases.includes(normalizeHeader(value))) ? 4 : 0), 0) + Math.min(row.filter(Boolean).length, 8) * 0.25;
+    const candidates = rows.slice(0, 25).map((row, index) => [index, score(row)]).sort((a, b) => b[1] - a[1]);
+    if (!candidates.length || candidates[0][1] < 1) {
+      sheets.push({ name: sheetName, status: "skipped", reason: "No tabular test case data detected", header_row: null, row_count: 0, mappings: [] });
+      continue;
+    }
+    const headerIndex = candidates[0][0];
+    const seen = new Map();
+    const headers = rows[headerIndex].map((value, index) => {
+      const base = String(value || `Column ${index + 1}`).trim();
+      const count = (seen.get(base) || 0) + 1;
+      seen.set(base, count);
+      return count > 1 ? `${base} (${count})` : base;
+    });
+    const used = new Set();
+    const mappings = headers.map((header) => {
+      const normalized = normalizeHeader(header);
+      const exact = Object.entries(BROWSER_FIELD_ALIASES).find(([field, aliases]) => !used.has(field) && aliases.includes(normalized));
+      const similar = exact || Object.entries(BROWSER_FIELD_ALIASES).find(([field, aliases]) => !used.has(field) && aliases.some((alias) => alias.length >= 4 && (normalized.includes(alias) || alias.includes(normalized))));
+      const target = similar?.[0] || null;
+      if (target) used.add(target);
+      return { source_column: header, target_field: target, confidence: exact ? 1 : target ? 0.82 : 1, reason: exact ? "Known field alias" : target ? "Similar field name" : "Preserved as an extra field" };
+    });
+    const targetByHeader = Object.fromEntries(mappings.map((item) => [item.source_column, item.target_field]));
+    let rowCount = 0;
+    rows.slice(headerIndex + 1).forEach((row, offset) => {
+      if (!row.some((value) => String(value).trim())) return;
+      const standard = {};
+      const extra_fields = {};
+      headers.forEach((header, index) => {
+        const value = row[index];
+        if (value === "" || value == null) return;
+        const target = targetByHeader[header];
+        if (target) standard[target] = value; else extra_fields[header] = value;
+      });
+      if (!["description", "test_steps", "expected_result"].some((field) => String(standard[field] || "").trim())) return;
+      const rawId = String(standard.case_id || "").trim();
+      cases.push({ id: null, case_id: rawId || `IMP-${String(generated++).padStart(4, "0")}`, case_type: /api|接口/i.test(standard.case_type || "") ? "API" : /mobile|app|移动/i.test(standard.case_type || "") ? "Mobile" : "Web", description: String(standard.description || "").trim(), preconditions: String(standard.preconditions || "").trim(), test_steps: String(standard.test_steps || "").trim(), test_data: String(standard.test_data || "").trim(), expected_result: String(standard.expected_result || "").trim(), priority: /high|critical|最高/i.test(standard.priority || "") ? "P0" : /low|低/i.test(standard.priority || "") ? "P2" : String(standard.priority || "P1").toUpperCase().match(/^P[0-2]$/)?.[0] || "P1", extra_fields, source_file: filename, source_sheet: sheetName, source_row: headerIndex + offset + 2, import_order: cases.length + 1, field_provenance: {}, mapping_confidence: 1, warnings: rawId ? [] : ["Case ID was generated"] });
+      rowCount += 1;
+    });
+    sheets.push({ name: sheetName, status: "imported", reason: "", header_row: headerIndex + 1, row_count: rowCount, mappings });
+  }
+  return { import_id: crypto.randomUUID(), filename, cases, sheets, warnings: cases.length ? [] : ["No test cases were detected."], explanation: [`Read ${sheets.length} sheet(s) in this browser.`, "Matched known aliases and preserved unmatched columns.", "Nothing leaves the browser until you ask DeepSeek to interpret a correction."] };
+}
+
+async function deepSeekCaseChange(message, preview) {
+  const apiKey = window.localStorage.getItem(API_KEY_STORAGE)?.trim();
+  if (!apiKey) throw new Error("Add a DeepSeek API key in Project settings first.");
+  const response = await fetch("https://api.deepseek.com/chat/completions", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: "deepseek-v4-flash", temperature: 0, response_format: { type: "json_object" }, thinking: { type: "disabled" }, messages: [{ role: "system", content: "Return JSON only. Edit exactly one QA case. Output import_order (integer), field (exact existing standard or extra field), value (string), message (short confirmation)." }, { role: "user", content: JSON.stringify({ request: message, cases: preview.cases.map(({ import_order, case_id, description, case_type, priority, test_data, extra_fields }) => ({ import_order, case_id, description, case_type, priority, test_data, extra_fields })) }) }] }) });
+  if (!response.ok) throw new Error(response.status === 401 ? "DeepSeek rejected this API key." : "DeepSeek could not process the request.");
+  const body = await response.json();
+  const decision = JSON.parse(body.choices?.[0]?.message?.content || "{}");
+  if (!preview.cases[Number(decision.import_order) - 1] || !decision.field || decision.value == null) throw new Error("DeepSeek did not return a safe single-case change.");
+  return decision;
+}
+
 function MappingQuality({ mapping }) {
   if (!mapping.target_field) return <small className="mapping-quality preserved" title="Not mapped to the standard schema; the original column and value are preserved.">Preserved</small>;
   if (mapping.reason === "LangChain semantic mapping") return <small className="mapping-quality ai" title="DeepSeek selected this mapping from the column name and sample values.">AI match · {Math.round(mapping.confidence * 100)}%</small>;
   if (mapping.reason === "Similar field name") return <small className="mapping-quality similar" title="Matched because the source column closely resembles a known field name.">Similar match</small>;
   return <small className="mapping-quality exact" title="Matched using a configured field alias.">Exact match</small>;
+}
+
+function ExtraFieldsPreview({ fields = {} }) {
+  const entries = Object.entries(fields);
+  if (!entries.length) return <span className="extra-fields-empty">0</span>;
+  return (
+    <span className="extra-fields-preview" tabIndex={0} aria-label={`${entries.length} extra fields. Focus or hover to view values.`}>
+      <span className="extra-fields-count">{entries.length}</span>
+      <span className="extra-fields-tooltip" role="tooltip">
+        <strong>Extra fields</strong>
+        <span className="extra-fields-list">{entries.map(([key, value]) => <span className="extra-field-row" key={key}><b>{key}</b><em>{String(value ?? "—")}</em></span>)}</span>
+      </span>
+    </span>
+  );
 }
 
 function ImportAgentModal({ onClose, onImported }) {
@@ -1113,7 +1203,7 @@ function ImportAgentModal({ onClose, onImported }) {
     const form = new FormData();
     form.append("file", file);
     try {
-      const result = await apiRequest("/api/imports/preview", { method: "POST", body: form });
+      const result = IS_GITHUB_PAGES ? parseWorkbookInBrowser(file.name, new Uint8Array(await file.arrayBuffer())) : await apiRequest("/api/imports/preview", { method: "POST", body: form });
       setPreview(result);
       setMessages([{ role: "agent", content: `I found ${result.cases.length} cases. Review the mapping below and tell me what to change before importing.` }]);
       setStage("preview");
@@ -1128,7 +1218,7 @@ function ImportAgentModal({ onClose, onImported }) {
     setBusy(true);
     setError("");
     try {
-      const result = await apiRequest(`/api/imports/${preview.import_id}/confirm`, { method: "POST" });
+      const result = IS_GITHUB_PAGES ? { cases: preview.cases.map((item, index) => ({ ...item, id: item.id || Number(String(item.case_id).replace(/\D/g, "")) || 900001 + index, title: item.description || "Imported test case", test_set: "Not assigned", automation: "Manual", status: "Draft", updated_at: "Just now" })) } : await apiRequest(`/api/imports/${preview.import_id}/confirm`, { method: "POST" });
       onImported(result.cases);
       onClose();
     } catch (confirmError) {
@@ -1146,7 +1236,15 @@ function ImportAgentModal({ onClose, onImported }) {
     setBusy(true);
     setError("");
     try {
-      const result = await apiRequest(`/api/imports/${preview.import_id}/chat`, {
+      const result = IS_GITHUB_PAGES ? await (async () => {
+        const decision = await deepSeekCaseChange(outgoing, preview);
+        const order = Number(decision.import_order);
+        const changed = preview.cases[order - 1];
+        const extra = !(decision.field in changed);
+        const updated = { ...changed, extra_fields: { ...changed.extra_fields } };
+        if (extra) updated.extra_fields[decision.field] = String(decision.value); else updated[decision.field] = String(decision.value);
+        return { message: decision.message || `Updated case ${order}.`, changes: [{ case_id: changed.case_id, import_order: order, field: decision.field, after: String(decision.value) }], cases: [updated] };
+      })() : await apiRequest(`/api/imports/${preview.import_id}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: outgoing }),
@@ -1200,7 +1298,7 @@ function ImportAgentModal({ onClose, onImported }) {
             <div className="chat-composer"><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder="在导入前修改，例如：第七条 case 的 user name 应该用 Lisa" /><button className="primary-button" disabled={!message.trim() || busy} onClick={() => sendMessage()}><PaperPlaneTilt size={17} weight="fill" /> Send</button></div>
           </section>
           <div className="case-preview-heading"><div><strong>Parsed test cases</strong><span>Review all {preview.cases.length} rows before import</span></div><span>{preview.cases.length} cases</span></div>
-          <div className="case-preview-table"><table><thead><tr><th>#</th><th>Source</th><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Extra fields</th></tr></thead><tbody>{preview.cases.map((item) => <tr key={`${item.source_sheet}-${item.source_row}`}><td>{item.import_order}</td><td>{item.source_sheet} · {item.source_row}</td><td>{item.case_id}</td><td>{item.description || "—"}</td><td>{item.case_type}</td><td>{item.priority}</td><td>{Object.keys(item.extra_fields).length}</td></tr>)}</tbody></table></div>
+          <div className="case-preview-table"><table><thead><tr><th>#</th><th>Source</th><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Extra fields</th></tr></thead><tbody>{preview.cases.map((item) => <tr key={`${item.source_sheet}-${item.source_row}`}><td>{item.import_order}</td><td>{item.source_sheet} · {item.source_row}</td><td>{item.case_id}</td><td>{item.description || "—"}</td><td>{item.case_type}</td><td>{item.priority}</td><td><ExtraFieldsPreview fields={item.extra_fields} /></td></tr>)}</tbody></table></div>
           <div className="sheet-report-heading"><strong>Source sheets & field mappings</strong><span>Collapsed to prioritize case review</span></div>
           <div className="sheet-report-list">{preview.sheets.map((sheet) => <details key={sheet.name}>
             <summary><span><FileText size={16} /><strong>{sheet.name}</strong></span><StatusPill tone={sheet.status === "imported" ? "success" : "neutral"}>{sheet.status === "imported" ? `${sheet.row_count} cases` : "Skipped"}</StatusPill></summary>
@@ -1461,7 +1559,11 @@ function SettingsPage({ project, projects, projectMerges, setProjectMerges, onTo
     setApiKeyBusy(true);
     setApiKeyStatus("checking");
     try {
-      const result = await apiRequest("/api/config/validate", { method: "POST", headers: { "X-DeepSeek-API-Key": value } });
+      const result = IS_GITHUB_PAGES ? await (async () => {
+        const response = await fetch("https://api.deepseek.com/models", { headers: { Authorization: `Bearer ${value}` } });
+        if (!response.ok) throw new Error(response.status === 401 ? "DeepSeek rejected this API key." : "DeepSeek could not verify this API key right now.");
+        return { model: "deepseek-v4-flash" };
+      })() : await apiRequest("/api/config/validate", { method: "POST", headers: { "X-DeepSeek-API-Key": value } });
       window.localStorage.setItem(API_KEY_STORAGE, value);
       setApiKeyStatus("valid");
       onToast(`DeepSeek API key verified for ${result.model || "the import agent"}.`);
