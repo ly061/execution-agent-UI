@@ -983,10 +983,35 @@ function caseDescription(testCase) {
 const AI_EDITABLE_CASE_FIELDS = ["case_type", "description", "preconditions", "test_steps", "test_data", "expected_result", "priority"];
 
 async function deepSeekCaseEdit(message, testCase, dataSets) {
-  const result = await apiRequest("/api/cases/assist", {
+  const request = { message, test_case: Object.fromEntries(["case_id", ...AI_EDITABLE_CASE_FIELDS].map((field) => [field, testCase[field] || ""])), available_data_sets: dataSets.map((item) => item.name) };
+  const result = IS_GITHUB_PAGES ? await (async () => {
+    const apiKey = window.localStorage.getItem(API_KEY_STORAGE)?.trim();
+    if (!apiKey) throw new Error("Add a DeepSeek API key in Project settings first.");
+    const response = await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "deepseek-v4-flash",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        thinking: { type: "disabled" },
+        messages: [
+          { role: "system", content: `You are a senior QA engineer helping edit one test case. Return JSON only with message and changes. Allowed fields: ${AI_EDITABLE_CASE_FIELDS.join(", ")}. Keep case_type to Web, API, or Mobile; priority to P0, P1, or P2. Use newline-separated numbered test_steps. Do not invent a test_data name outside the provided available data sets. Never return or repeat credentials.` },
+          { role: "user", content: JSON.stringify({ request: request.message, current_case: request.test_case, available_data_sets: request.available_data_sets }) },
+        ],
+      }),
+    });
+    if (!response.ok) throw new Error(response.status === 401 ? "DeepSeek rejected this API key." : "DeepSeek could not update the case right now.");
+    const body = await response.json();
+    try {
+      return JSON.parse(body.choices?.[0]?.message?.content || "{}");
+    } catch {
+      throw new Error("The AI service returned an invalid case update.");
+    }
+  })() : await apiRequest("/api/cases/assist", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, test_case: Object.fromEntries(["case_id", ...AI_EDITABLE_CASE_FIELDS].map((field) => [field, testCase[field] || ""])), available_data_sets: dataSets.map((item) => item.name) }),
+    body: JSON.stringify(request),
   });
   const changes = Object.fromEntries(Object.entries(result.changes || {}).filter(([field, value]) => AI_EDITABLE_CASE_FIELDS.includes(field) && value != null).map(([field, value]) => [field, String(value)]));
   if (!Object.keys(changes).length) throw new Error("AI did not return any safe case changes. Try a more specific request.");
