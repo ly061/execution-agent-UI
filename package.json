@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "build": "vite build",
     "deploy:local": "bash scripts/deploy-local.sh",
     "deploy:local:stop": "bash scripts/deploy-local.sh stop",
     "preview": "vite preview",
