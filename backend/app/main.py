@@ -10,7 +10,8 @@ from . import database
 from .agent import chat
 from .importer import build_preview
 from .llm import DEEPSEEK_MODEL, deepseek_enabled
-from .models import ChatRequest, ChatResponse, ConfirmResponse, ImportPreview
+from .models import CaseAssistRequest, CaseAssistResponse, ChatRequest, ChatResponse, ConfirmResponse, ImportPreview
+from .case_assistant import assist_case
 
 
 @asynccontextmanager
@@ -50,6 +51,15 @@ async def validate_api_key(x_deepseek_api_key: str | None = Header(default=None)
     if not response.is_success:
         raise HTTPException(status_code=502, detail="DeepSeek could not verify this API key right now.")
     return {"valid": True, "provider": "deepseek", "model": DEEPSEEK_MODEL}
+
+
+@app.post("/api/cases/assist", response_model=CaseAssistResponse)
+async def case_assistant(request: CaseAssistRequest, x_deepseek_api_key: str | None = Header(default=None)) -> CaseAssistResponse:
+    try:
+        return await assist_case(request, x_deepseek_api_key)
+    except RuntimeError as error:
+        status = 503 if "not configured" in str(error) else 502
+        raise HTTPException(status_code=status, detail=str(error)) from error
 
 
 @app.post("/api/imports/preview", response_model=ImportPreview)

@@ -980,6 +980,23 @@ function caseDescription(testCase) {
   return testCase.description || testCase.title || "";
 }
 
+const AI_EDITABLE_CASE_FIELDS = ["case_type", "description", "preconditions", "test_steps", "test_data", "expected_result", "priority"];
+
+async function deepSeekCaseEdit(message, testCase, dataSets) {
+  const result = await apiRequest("/api/cases/assist", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, test_case: Object.fromEntries(["case_id", ...AI_EDITABLE_CASE_FIELDS].map((field) => [field, testCase[field] || ""])), available_data_sets: dataSets.map((item) => item.name) }),
+  });
+  const changes = Object.fromEntries(Object.entries(result.changes || {}).filter(([field, value]) => AI_EDITABLE_CASE_FIELDS.includes(field) && value != null).map(([field, value]) => [field, String(value)]));
+  if (!Object.keys(changes).length) throw new Error("AI did not return any safe case changes. Try a more specific request.");
+  if (changes.case_type && !["Web", "API", "Mobile"].includes(changes.case_type)) delete changes.case_type;
+  if (changes.priority && !["P0", "P1", "P2"].includes(changes.priority)) delete changes.priority;
+  if (changes.test_data && !dataSets.some((item) => item.name === changes.test_data)) delete changes.test_data;
+  if (!Object.keys(changes).length) throw new Error("AI suggested values that are not available in this project.");
+  return { message: String(result.message || "I updated the case draft for your review."), changes };
+}
+
 function CaseEditModal({ testCase, suggestedCaseId, dataSets, onClose, onSave }) {
   const isNew = !testCase?.id;
   const [form, setForm] = useState(() => ({
@@ -993,34 +1010,68 @@ function CaseEditModal({ testCase, suggestedCaseId, dataSets, onClose, onSave })
     expected_result: testCase?.expected_result || "",
     priority: testCase?.priority || "P1",
   }));
+  const [aiMessage, setAiMessage] = useState("");
+  const [aiMessages, setAiMessages] = useState([{ role: "agent", content: "Tell me what you want to improve. I can rewrite the description, add coverage, clarify steps, or strengthen the expected result." }]);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [aiHistory, setAiHistory] = useState([]);
   const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
   const selectedDataSet = dataSets.find((item) => item.name === form.test_data);
+
+  async function askAi(text = aiMessage) {
+    const outgoing = text.trim();
+    if (!outgoing || aiBusy) return;
+    setAiMessage("");
+    setAiMessages((current) => [...current, { role: "user", content: outgoing }]);
+    setAiBusy(true);
+    setAiError("");
+    try {
+      const result = await deepSeekCaseEdit(outgoing, form, dataSets);
+      const previous = form;
+      const changes = Object.entries(result.changes).map(([field, after]) => ({ field, before: previous[field] || "", after }));
+      setAiHistory((current) => [...current, previous]);
+      setForm((current) => ({ ...current, ...result.changes }));
+      setAiMessages((current) => [...current, { role: "agent", content: result.message, changes }]);
+    } catch (error) {
+      setAiError(error.message);
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  function undoAiChange() {
+    if (!aiHistory.length || aiBusy) return;
+    const previous = aiHistory[aiHistory.length - 1];
+    setForm(previous);
+    setAiHistory((current) => current.slice(0, -1));
+    setAiMessages((current) => [...current, { role: "agent", content: "Undid the last AI change. Your earlier draft has been restored." }]);
+  }
+
   return (
-    <div className="modal-layer">
+    <div className="modal-layer case-editor-layer">
       <button className="modal-backdrop" onClick={onClose} aria-label="Close test case editor" />
       <section className="modal-card case-editor-modal">
-        <div className="modal-header"><div><span className="eyebrow">Test inventory</span><h2>{isNew ? "Create test case" : "Edit test case"}</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
-        <div className="modal-form case-editor-form">
-          <label><span>Case ID</span><input value={form.case_id} onChange={(event) => update("case_id", event.target.value)} disabled={!isNew} placeholder="Unique test case ID" /></label>
-          <label><span>Case type</span><select value={form.case_type} onChange={(event) => update("case_type", event.target.value)}><option>Web</option><option>API</option><option>Mobile</option></select></label>
-          <label><span>Description</span><textarea value={form.description} onChange={(event) => update("description", event.target.value)} placeholder="Describe the test case" /></label>
-          <label><span>Pre-conditions</span><textarea value={form.preconditions} onChange={(event) => update("preconditions", event.target.value)} placeholder="Required state before execution" /></label>
-          <label><span>Test steps</span><textarea value={form.test_steps || ""} onChange={(event) => update("test_steps", event.target.value)} placeholder="Enter one step per line" /></label>
-          <label>
-            <span>Test data</span>
-            {form.test_data ? (
-              <span className="selected-data-control">
-                <DataSetLabel dataSet={selectedDataSet} name={form.test_data} />
-                <button type="button" className="text-button" onClick={() => update("test_data", "")}>Change</button>
-              </span>
-            ) : (
-              <select value="" onChange={(event) => update("test_data", event.target.value)}><option value="">Not assigned</option>{dataSets.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select>
-            )}
-          </label>
-          <label><span>Expected result</span><textarea value={form.expected_result || ""} onChange={(event) => update("expected_result", event.target.value)} placeholder="Expected outcome" /></label>
-          <label><span>Priority</span><select value={form.priority} onChange={(event) => update("priority", event.target.value)}><option>P0</option><option>P1</option><option>P2</option></select></label>
+        <div className="modal-header case-editor-header"><div><span className="eyebrow">Test inventory</span><h2>{isNew ? "Create test case" : "Edit test case"}</h2><p>Edit manually or ask AI to improve this draft.</p></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
+        <div className="case-editor-workspace">
+          <div className="case-editor-scroll">
+            <div className="modal-form case-editor-form">
+              <div className="case-editor-row"><label><span>Case ID</span><input value={form.case_id} onChange={(event) => update("case_id", event.target.value)} disabled={!isNew} placeholder="Unique test case ID" /></label><label><span>Case type</span><select value={form.case_type} onChange={(event) => update("case_type", event.target.value)}><option>Web</option><option>API</option><option>Mobile</option></select></label><label><span>Priority</span><select value={form.priority} onChange={(event) => update("priority", event.target.value)}><option>P0</option><option>P1</option><option>P2</option></select></label></div>
+              <label><span>Description</span><textarea className="editor-description" value={form.description} onChange={(event) => update("description", event.target.value)} placeholder="Describe the test case" /></label>
+              <label><span>Pre-conditions</span><textarea value={form.preconditions} onChange={(event) => update("preconditions", event.target.value)} placeholder="Required state before execution" /></label>
+              <label><span>Test steps</span><textarea className="editor-steps" value={form.test_steps || ""} onChange={(event) => update("test_steps", event.target.value)} placeholder="Enter one step per line" /></label>
+              <label><span>Expected result</span><textarea value={form.expected_result || ""} onChange={(event) => update("expected_result", event.target.value)} placeholder="Expected outcome" /></label>
+              <label><span>Test data</span>{form.test_data ? <span className="selected-data-control"><DataSetLabel dataSet={selectedDataSet} name={form.test_data} /><button type="button" className="text-button" onClick={() => update("test_data", "")}>Change</button></span> : <select value="" onChange={(event) => update("test_data", event.target.value)}><option value="">Not assigned</option>{dataSets.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select>}</label>
+            </div>
+          </div>
+          <aside className="case-ai-panel">
+            <div className="case-ai-heading"><span><Robot size={18} weight="duotone" /></span><div><strong>AI case assistant</strong><small>Changes are applied to this draft only</small></div></div>
+            <div className="chat-messages">{aiMessages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div><p>{item.content}</p>{item.changes?.map((change) => <small key={change.field}>{change.field.replaceAll("_", " ")}: {change.before || "—"} → {change.after}</small>)}</div></div>)}{aiBusy && <div className="chat-message agent"><span><Robot size={16} /></span><div><p>Improving the case draft…</p></div></div>}</div>
+            <div className="chat-suggestions"><button onClick={() => askAi("Make this test case clearer and more concise")}>Improve clarity</button><button onClick={() => askAi("Add important edge-case coverage to the steps and expected result")}>Add edge cases</button><button disabled={!aiHistory.length} onClick={undoAiChange}>Undo AI change</button></div>
+            {aiError && <div className="case-ai-error"><Warning size={15} />{aiError}</div>}
+            <div className="chat-composer"><textarea value={aiMessage} onChange={(event) => setAiMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); askAi(); } }} placeholder="Ask AI to modify this case…" /><button className="primary-button" disabled={!aiMessage.trim() || aiBusy} onClick={() => askAi()} aria-label="Send to AI"><PaperPlaneTilt size={17} weight="fill" /> Send</button></div>
+          </aside>
         </div>
-        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!form.case_id.trim() || !form.description.trim()} onClick={() => onSave(form)}><Check size={16} /> {isNew ? "Create case" : "Save changes"}</button></div>
+        <div className="modal-actions case-editor-actions"><span>AI changes are not saved until you confirm.</span><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!form.case_id.trim() || !form.description.trim() || aiBusy} onClick={() => onSave(form)}><Check size={16} /> {isNew ? "Create case" : "Save changes"}</button></div>
       </section>
     </div>
   );

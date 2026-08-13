@@ -13,6 +13,7 @@ const FIELD_ALIASES = {
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 const requestApiKey = (request, env) => request.headers.get("x-deepseek-api-key")?.trim() || env.DEEPSEEK_API_KEY;
+const EDITABLE_CASE_FIELDS = ["case_type", "description", "preconditions", "test_steps", "test_data", "expected_result", "priority"];
 const ALLOWED_ORIGINS = new Set(["https://ly061.github.io", "http://localhost:4173", "http://localhost:5173", "http://127.0.0.1:4173", "http://127.0.0.1:5173"]);
 
 function withCors(response, request) {
@@ -151,6 +152,37 @@ async function interpretWithDeepSeek(message, session, request, env) {
   return { change: { case_id: item.case_id, import_order: order, field, before, after: value, extra }, message: String(decision.message || "").trim() };
 }
 
+async function assistCase(request, env) {
+  const apiKey = requestApiKey(request, env);
+  if (!apiKey) return json({ detail: "The AI service is not configured for this project." }, 503);
+  const { message = "", test_case = {}, available_data_sets = [] } = await request.json();
+  if (!String(message).trim()) return json({ detail: "Enter a request for the AI case assistant." }, 400);
+  const response = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: env.DEEPSEEK_MODEL || "deepseek-v4-flash",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      thinking: { type: "disabled" },
+      messages: [
+        { role: "system", content: `You are a senior QA engineer helping edit one test case. Return JSON only with message (a concise confirmation) and changes (an object containing only fields that should change). Allowed fields: ${EDITABLE_CASE_FIELDS.join(", ")}. Keep case_type to Web, API, or Mobile; priority to P0, P1, or P2. Use newline-separated numbered test_steps. Do not invent a test_data name outside the provided available data sets. Never return or repeat credentials.` },
+        { role: "user", content: JSON.stringify({ request: message, current_case: test_case, available_data_sets }) },
+      ],
+    }),
+  });
+  if (!response.ok) return json({ detail: response.status === 401 ? "DeepSeek rejected the configured API key." : "DeepSeek could not update the case right now." }, response.status === 401 ? 401 : 502);
+  const body = await response.json();
+  let decision;
+  try { decision = JSON.parse(body.choices?.[0]?.message?.content || "{}"); } catch { return json({ detail: "The AI service returned an invalid case update." }, 502); }
+  const changes = Object.fromEntries(Object.entries(decision.changes || {}).filter(([field, value]) => EDITABLE_CASE_FIELDS.includes(field) && value != null).map(([field, value]) => [field, String(value)]));
+  if (changes.case_type && !["Web", "API", "Mobile"].includes(changes.case_type)) delete changes.case_type;
+  if (changes.priority && !["P0", "P1", "P2"].includes(changes.priority)) delete changes.priority;
+  if (changes.test_data && !available_data_sets.includes(changes.test_data)) delete changes.test_data;
+  if (!Object.keys(changes).length) return json({ detail: "AI did not return any safe case changes. Try a more specific request." }, 422);
+  return json({ message: String(decision.message || "I updated the case draft for your review."), changes });
+}
+
 async function handleApi(request, env, url) {
   if (request.method === "GET" && url.pathname === "/api/health") return json({ status: "ok", framework: "cloudflare-worker", provider: "deepseek", model: env.DEEPSEEK_MODEL || "deepseek-v4-flash", model_configured: String(Boolean(requestApiKey(request, env))) });
   if (request.method === "POST" && url.pathname === "/api/config/validate") {
@@ -160,6 +192,7 @@ async function handleApi(request, env, url) {
     if (!response.ok) return json({ detail: response.status === 401 ? "DeepSeek rejected this API key." : "DeepSeek could not verify this API key right now." }, response.status === 401 ? 401 : 502);
     return json({ valid: true, provider: "deepseek", model: env.DEEPSEEK_MODEL || "deepseek-v4-flash" });
   }
+  if (request.method === "POST" && url.pathname === "/api/cases/assist") return assistCase(request, env);
   const isPreview = request.method === "POST" && url.pathname === "/api/imports/preview";
   const match = url.pathname.match(/^\/api\/imports\/([^/]+)\/(confirm|cases|chat)$/);
   if (!isPreview && !match) return json({ detail: "API route not found" }, 404);

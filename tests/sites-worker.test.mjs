@@ -90,6 +90,40 @@ test("validates a manually supplied API key without persisting it", async () => 
   }
 });
 
+test("uses the project AI service to assist with editing a test case", async () => {
+  const originalFetch = globalThis.fetch;
+  let authorization;
+  let modelRequest;
+  globalThis.fetch = async (_url, options) => {
+    authorization = options.headers.Authorization;
+    modelRequest = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ message: "Clarified the expected result.", changes: { expected_result: "A claim reference is displayed after successful submission.", case_id: "DO-NOT-CHANGE" } }) } }] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const response = await worker.fetch(new Request("https://example.test/api/cases/assist", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "Improve clarity", test_case: { case_id: "TC-1", expected_result: "Created" }, available_data_sets: [] }),
+    }), { DEEPSEEK_API_KEY: "sk-project-key" });
+    assert.equal(response.status, 200);
+    assert.equal(authorization, "Bearer sk-project-key");
+    assert.equal(modelRequest.model, "deepseek-v4-flash");
+    assert.deepEqual((await response.json()).changes, { expected_result: "A claim reference is displayed after successful submission." });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("reports when the project AI service is not configured", async () => {
+  const response = await worker.fetch(new Request("https://example.test/api/cases/assist", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "Improve clarity", test_case: {}, available_data_sets: [] }),
+  }), {});
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).detail, /not configured/i);
+});
+
 test("allows the GitHub Pages frontend to call the API", async () => {
   const request = new Request("https://example.test/api/health", { headers: { Origin: "https://ly061.github.io" } });
   const response = await worker.fetch(request, {});

@@ -99,6 +99,17 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
 
 
+class CaseAssistRequest(BaseModel):
+    message: str = Field(min_length=1)
+    test_case: dict[str, Any]
+    available_data_sets: list[str] = Field(default_factory=list)
+
+
+class CaseAssistResponse(BaseModel):
+    message: str
+    changes: dict[str, str]
+
+
 class Change(BaseModel):
     case_id: str
     import_order: int
