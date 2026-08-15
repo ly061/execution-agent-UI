@@ -7,6 +7,8 @@ import {
   Archive,
   ArrowLeft,
   ArrowClockwise,
+  ArrowsIn,
+  ArrowsOut,
   Bell,
   CaretDown,
   CaretRight,
@@ -29,6 +31,7 @@ import {
   Key,
   ListChecks,
   Lock,
+  MagicWand,
   MagnifyingGlass,
   PauseCircle,
   PencilSimple,
@@ -62,17 +65,33 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { cancelLocalRun, checkLocalAgent, getLocalAgentSettings, listLocalRuns, saveLocalAgentSettings, submitLocalRun } from "./localAgent.js";
 
 const NAV = [
-  { id: "dashboard", label: "Dashboard", icon: ChartBar },
-  { id: "runs", label: "Test runs", icon: Pulse },
-  { id: "plans", label: "Test plans", icon: ClipboardText },
-  { id: "sets", label: "Test sets", icon: Rows },
-  { id: "cases", label: "Test cases", icon: ListChecks },
-  { id: "data", label: "My data", icon: Database },
-  { id: "apps", label: "App config", icon: AppWindow },
-  { id: "security", label: "Security config", icon: ShieldCheck },
-  { id: "settings", label: "Project settings", icon: GearSix },
+  {
+    id: "generation",
+    label: "Generation",
+    icon: MagicWand,
+    children: [
+      { id: "generate", label: "Generate cases", icon: Sparkle },
+    ],
+  },
+  {
+    id: "execution",
+    label: "Execution",
+    icon: TestTube,
+    children: [
+      { id: "dashboard", label: "Dashboard", icon: ChartBar },
+      { id: "runs", label: "Test runs", icon: Pulse },
+      { id: "plans", label: "Test plans", icon: ClipboardText },
+      { id: "sets", label: "Test sets", icon: Rows },
+      { id: "cases", label: "Test cases", icon: ListChecks },
+      { id: "data", label: "My data", icon: Database },
+      { id: "apps", label: "App config", icon: AppWindow },
+      { id: "security", label: "Security config", icon: ShieldCheck },
+      { id: "settings", label: "Project settings", icon: GearSix },
+    ],
+  },
 ];
 
 const CURRENT_USER = "maya.chen@demo.com";
@@ -179,6 +198,15 @@ function EmptyState({ title, detail }) {
 }
 
 function Sidebar({ page, setPage, collapsed, setCollapsed }) {
+  const [activeSection, setActiveSection] = useState(() => {
+    const section = NAV.find((s) => s.children.some((item) => item.id === page));
+    return section ? section.id : NAV[0].id;
+  });
+  useEffect(() => {
+    const section = NAV.find((s) => s.children.some((item) => item.id === page));
+    if (section) setActiveSection(section.id);
+  }, [page]);
+  const section = NAV.find((s) => s.id === activeSection) || NAV[0];
   return (
     <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
       <div className="brand-block">
@@ -191,20 +219,45 @@ function Sidebar({ page, setPage, collapsed, setCollapsed }) {
         )}
       </div>
       <nav className="side-nav" aria-label="Main navigation">
-        {NAV.map((item) => {
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.id}
-              className={page === item.id ? "active" : ""}
-              onClick={() => setPage(item.id)}
-              title={collapsed ? item.label : undefined}
-            >
-              <Icon size={20} weight={page === item.id ? "fill" : "regular"} />
-              {!collapsed && <span>{item.label}</span>}
-            </button>
-          );
-        })}
+        <div className="nav-pane nav-pane-primary">
+          {NAV.map((item) => {
+            const Icon = item.icon;
+            const active = item.id === section.id;
+            return (
+              <button
+                key={item.id}
+                className={active ? "active" : ""}
+                onClick={() => {
+                  setActiveSection(item.id);
+                  if (collapsed) setCollapsed(false);
+                }}
+                title={collapsed ? item.label : undefined}
+              >
+                <Icon size={20} weight={active ? "fill" : "regular"} />
+                {!collapsed && <span>{item.label}</span>}
+              </button>
+            );
+          })}
+        </div>
+        {!collapsed && (
+          <div className="nav-pane nav-pane-secondary">
+            <div className="nav-pane-heading">{section.label}</div>
+            {section.children.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  className={page === item.id ? "active" : ""}
+                  onClick={() => setPage(item.id)}
+                  title={item.label}
+                >
+                  <Icon size={20} weight={page === item.id ? "fill" : "regular"} />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </nav>
       <div className="side-footer">
         <button onClick={() => setCollapsed(!collapsed)} title="Collapse navigation">
@@ -512,6 +565,8 @@ function TestRunsPage({ data, onRun, onToast }) {
   const [caseScope, setCaseScope] = useState(null);
   const [queue, setQueue] = useState(data.queue);
   const [queueExpanded, setQueueExpanded] = useState(false);
+  const [localRuns, setLocalRuns] = useState([]);
+  const [localAgentOnline, setLocalAgentOnline] = useState(false);
   const maxConcurrentRuns = 3;
   const queuedCount = queue.filter((item) => item.status === "Queued").length;
   const planRuns = useMemo(() => summarizeRuns(data.runs, "plan_name"), [data.runs]);
@@ -519,6 +574,29 @@ function TestRunsPage({ data, onRun, onToast }) {
   const visibleCaseRuns = caseScope
     ? data.runs.filter((run) => run[caseScope.key] === caseScope.name)
     : data.runs;
+
+  useEffect(() => {
+    let active = true;
+    let timer;
+    async function loadLocalRuns() {
+      if (!getLocalAgentSettings().token) return;
+      try {
+        const payload = await listLocalRuns();
+        if (active) {
+          setLocalRuns(payload.tasks || []);
+          setLocalAgentOnline(true);
+        }
+      } catch {
+        if (active) setLocalAgentOnline(false);
+      }
+      if (active) timer = setTimeout(loadLocalRuns, 3000);
+    }
+    loadLocalRuns();
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, []);
 
   function viewCases(group, key) {
     setCaseScope({ key, name: group.name });
@@ -542,6 +620,13 @@ function TestRunsPage({ data, onRun, onToast }) {
         title="Test runs"
         description="Review test execution history, results and detailed evidence across cases, plans and sets."
       />
+
+      {getLocalAgentSettings().token && (
+        <section className="panel local-agent-panel">
+          <div className="local-agent-heading"><span className={`local-agent-orb ${localAgentOnline ? "online" : ""}`}><Robot size={19} weight="duotone" /></span><div><span className="panel-kicker">This device</span><strong>Local Agent</strong><small>{localAgentOnline ? `${localRuns.filter((task) => ["queued", "running"].includes(task.status)).length} active · isolated browser profiles` : "Desktop app is offline"}</small></div><StatusPill tone={localAgentOnline ? "success" : "neutral"}>{localAgentOnline ? "Connected" : "Offline"}</StatusPill></div>
+          {localRuns.length > 0 && <div className="local-run-list">{localRuns.slice(0, 4).map((task) => <div className="local-run-row" key={task.id}><span className={`local-run-state ${task.status}`} /><div><strong>{task.title}</strong><small>{task.id.slice(0, 8)} · {task.logs.at(-1) || "Waiting"}</small></div><StatusPill tone={task.status === "completed" ? "success" : task.status === "failed" ? "danger" : task.status === "running" ? "info" : "neutral"}>{task.status}</StatusPill>{["queued", "running"].includes(task.status) && <button className="danger-text-button" onClick={async () => { await cancelLocalRun(task.id); onToast(`Cancellation requested for ${task.id.slice(0, 8)}.`); }}>Cancel</button>}</div>)}</div>}
+        </section>
+      )}
 
       <section className={`panel queue-panel queue-collapsible ${queueExpanded ? "expanded" : ""}`}>
         <button className="queue-summary-button" onClick={() => setQueueExpanded((expanded) => !expanded)} aria-expanded={queueExpanded}>
@@ -1179,6 +1264,78 @@ const BROWSER_FIELD_ALIASES = {
 
 const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replaceAll("_", " ").replace(/[\s\-–—/:()]+/g, " ");
 
+const isActiveRow = (row) => row.filter((value) => String(value ?? "").trim()).length >= 2;
+const headerScore = (row) => row.reduce((total, value) => total + (Object.values(BROWSER_FIELD_ALIASES).some((aliases) => aliases.includes(normalizeHeader(value))) ? 4 : 0), 0) + Math.min(row.filter(Boolean).length, 8) * 0.25;
+const REGION_HEADER_WINDOW = 25;
+const HEADER_MIN_SCORE = 1;
+const DATA_OVERLAP_MIN = 0.5;
+
+function expandMergedCells(rows, sheet) {
+  const merges = sheet["!merges"] || [];
+  for (const merge of merges) {
+    const value = rows[merge.s.r]?.[merge.s.c];
+    if (value === undefined || value === null || String(value).trim() === "") continue;
+    for (let r = merge.s.r; r <= merge.e.r; r += 1) {
+      if (!rows[r]) rows[r] = [];
+      for (let c = merge.s.c; c <= merge.e.c; c += 1) rows[r][c] = value;
+    }
+  }
+}
+
+function tableRegions(rows) {
+  const member = rows.map(isActiveRow);
+  for (let i = 0; i < member.length; i += 1) {
+    if (!member[i] && i > 0 && i + 1 < member.length && member[i - 1] && member[i + 1]) member[i] = true;
+  }
+  const regions = [];
+  let start = -1;
+  for (let i = 0; i <= member.length; i += 1) {
+    const active = i < member.length && member[i];
+    if (active && start === -1) start = i;
+    else if (!active && start !== -1) { regions.push([start, i - 1]); start = -1; }
+  }
+  return regions;
+}
+
+function analyzeRegion(rows, start, end) {
+  const window = Math.min(end + 1, start + REGION_HEADER_WINDOW);
+  let headerIndex = -1;
+  let best = -Infinity;
+  for (let index = start; index < window; index += 1) {
+    const value = headerScore(rows[index]);
+    if (value > best) { best = value; headerIndex = index; }
+  }
+  if (best < HEADER_MIN_SCORE) return null;
+  const seen = new Map();
+  const headers = rows[headerIndex].map((value, index) => {
+    const base = String(value || `Column ${index + 1}`).trim();
+    const count = (seen.get(base) || 0) + 1;
+    seen.set(base, count);
+    return count > 1 ? `${base} (${count})` : base;
+  });
+  const headerColumns = [];
+  rows[headerIndex].forEach((value, index) => { if (String(value ?? "").trim()) headerColumns.push(index); });
+  const dataRows = [];
+  let aligned = false;
+  for (let sourceIndex = headerIndex + 1; sourceIndex <= end; sourceIndex += 1) {
+    const row = rows[sourceIndex];
+    if (!isActiveRow(row)) continue;
+    if (!aligned) {
+      const filled = headerColumns.filter((column) => String(row[column] ?? "").trim()).length;
+      if (headerColumns.length && filled / headerColumns.length < DATA_OVERLAP_MIN) continue;
+      aligned = true;
+    }
+    dataRows.push({ row, sourceIndex });
+  }
+  let reason = "";
+  if (!aligned) {
+    reason = rows.slice(headerIndex + 1, end + 1).some(isActiveRow)
+      ? "Header row found but rows below it do not align with the columns"
+      : "Header row found but no data rows below it";
+  }
+  return { headerIndex, headers, dataRows, reason };
+}
+
 function parseWorkbookInBrowser(filename, bytes) {
   const workbook = XLSX.read(bytes, { type: "array" });
   const cases = [];
@@ -1186,49 +1343,47 @@ function parseWorkbookInBrowser(filename, bytes) {
   let generated = 1;
   for (const sheetName of workbook.SheetNames) {
     const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false });
-    const score = (row) => row.reduce((total, value) => total + (Object.values(BROWSER_FIELD_ALIASES).some((aliases) => aliases.includes(normalizeHeader(value))) ? 4 : 0), 0) + Math.min(row.filter(Boolean).length, 8) * 0.25;
-    const candidates = rows.slice(0, 25).map((row, index) => [index, score(row)]).sort((a, b) => b[1] - a[1]);
-    if (!candidates.length || candidates[0][1] < 1) {
-      sheets.push({ name: sheetName, status: "skipped", reason: "No tabular test case data detected", header_row: null, row_count: 0, mappings: [] });
+    expandMergedCells(rows, workbook.Sheets[sheetName]);
+    const tables = [];
+    for (const [start, end] of tableRegions(rows)) {
+      const table = analyzeRegion(rows, start, end);
+      if (table) tables.push(table);
+    }
+    if (!tables.length) {
+      sheets.push({ name: sheetName, status: "skipped", reason: "No tabular test case data detected", header_row: null, row_count: 0, mappings: [], table_index: 1 });
       continue;
     }
-    const headerIndex = candidates[0][0];
-    const seen = new Map();
-    const headers = rows[headerIndex].map((value, index) => {
-      const base = String(value || `Column ${index + 1}`).trim();
-      const count = (seen.get(base) || 0) + 1;
-      seen.set(base, count);
-      return count > 1 ? `${base} (${count})` : base;
-    });
-    const used = new Set();
-    const mappings = headers.map((header) => {
-      const normalized = normalizeHeader(header);
-      const exact = Object.entries(BROWSER_FIELD_ALIASES).find(([field, aliases]) => !used.has(field) && aliases.includes(normalized));
-      const similar = exact || Object.entries(BROWSER_FIELD_ALIASES).find(([field, aliases]) => !used.has(field) && aliases.some((alias) => alias.length >= 4 && (normalized.includes(alias) || alias.includes(normalized))));
-      const target = similar?.[0] || null;
-      if (target) used.add(target);
-      return { source_column: header, target_field: target, confidence: exact ? 1 : target ? 0.82 : 1, reason: exact ? "Known field alias" : target ? "Similar field name" : "Preserved as an extra field" };
-    });
-    const targetByHeader = Object.fromEntries(mappings.map((item) => [item.source_column, item.target_field]));
-    let rowCount = 0;
-    rows.slice(headerIndex + 1).forEach((row, offset) => {
-      if (!row.some((value) => String(value).trim())) return;
-      const standard = {};
-      const extra_fields = {};
-      headers.forEach((header, index) => {
-        const value = row[index];
-        if (value === "" || value == null) return;
-        const target = targetByHeader[header];
-        if (target) standard[target] = value; else extra_fields[header] = value;
+    tables.forEach((table, tableOffset) => {
+      const used = new Set();
+      const mappings = table.headers.map((header) => {
+        const normalized = normalizeHeader(header);
+        const exact = Object.entries(BROWSER_FIELD_ALIASES).find(([field, aliases]) => !used.has(field) && aliases.includes(normalized));
+        const similar = exact || Object.entries(BROWSER_FIELD_ALIASES).find(([field, aliases]) => !used.has(field) && aliases.some((alias) => alias.length >= 4 && (normalized.includes(alias) || alias.includes(normalized))));
+        const target = similar?.[0] || null;
+        if (target) used.add(target);
+        return { source_column: header, target_field: target, confidence: exact ? 1 : target ? 0.82 : 1, reason: exact ? "Known field alias" : target ? "Similar field name" : "Preserved as an extra field" };
       });
-      if (!["description", "test_steps", "expected_result"].some((field) => String(standard[field] || "").trim())) return;
-      const rawId = String(standard.case_id || "").trim();
-      cases.push({ id: null, case_id: rawId || `IMP-${String(generated++).padStart(4, "0")}`, case_type: /api|接口/i.test(standard.case_type || "") ? "API" : /mobile|app|移动/i.test(standard.case_type || "") ? "Mobile" : "Web", description: String(standard.description || "").trim(), preconditions: String(standard.preconditions || "").trim(), test_steps: String(standard.test_steps || "").trim(), test_data: String(standard.test_data || "").trim(), expected_result: String(standard.expected_result || "").trim(), priority: /high|critical|最高/i.test(standard.priority || "") ? "P0" : /low|低/i.test(standard.priority || "") ? "P2" : String(standard.priority || "P1").toUpperCase().match(/^P[0-2]$/)?.[0] || "P1", extra_fields, source_file: filename, source_sheet: sheetName, source_row: headerIndex + offset + 2, import_order: cases.length + 1, field_provenance: {}, mapping_confidence: 1, warnings: rawId ? [] : ["Case ID was generated"] });
-      rowCount += 1;
+      const targetByHeader = Object.fromEntries(mappings.map((item) => [item.source_column, item.target_field]));
+      let rowCount = 0;
+      for (const { row, sourceIndex } of table.dataRows) {
+        const standard = {};
+        const extra_fields = {};
+        table.headers.forEach((header, index) => {
+          const value = row[index];
+          if (value === "" || value == null) return;
+          const target = targetByHeader[header];
+          if (target) standard[target] = value; else extra_fields[header] = value;
+        });
+        if (!["description", "test_steps", "expected_result"].some((field) => String(standard[field] || "").trim())) continue;
+        const rawId = String(standard.case_id || "").trim();
+        cases.push({ id: null, case_id: rawId || `IMP-${String(generated++).padStart(4, "0")}`, case_type: /api|接口/i.test(standard.case_type || "") ? "API" : /mobile|app|移动/i.test(standard.case_type || "") ? "Mobile" : "Web", description: String(standard.description || "").trim(), preconditions: String(standard.preconditions || "").trim(), test_steps: String(standard.test_steps || "").trim(), test_data: String(standard.test_data || "").trim(), expected_result: String(standard.expected_result || "").trim(), priority: /high|critical|最高/i.test(standard.priority || "") ? "P0" : /low|低/i.test(standard.priority || "") ? "P2" : String(standard.priority || "P1").toUpperCase().match(/^P[0-2]$/)?.[0] || "P1", extra_fields, source_file: filename, source_sheet: sheetName, source_row: sourceIndex + 1, import_order: cases.length + 1, field_provenance: {}, mapping_confidence: 1, warnings: rawId ? [] : ["Case ID was generated"] });
+        rowCount += 1;
+      }
+      sheets.push({ name: sheetName, status: rowCount ? "imported" : "no-data", reason: rowCount ? "" : table.reason || "Header row found but no test cases were produced", header_row: table.headerIndex + 1, row_count: rowCount, mappings, table_index: tableOffset + 1 });
     });
-    sheets.push({ name: sheetName, status: "imported", reason: "", header_row: headerIndex + 1, row_count: rowCount, mappings });
   }
-  return { import_id: crypto.randomUUID(), filename, cases, sheets, warnings: cases.length ? [] : ["No test cases were detected."], explanation: [`Read ${sheets.length} sheet(s) in this browser.`, "Matched known aliases and preserved unmatched columns.", "Nothing leaves the browser until you ask DeepSeek to interpret a correction."] };
+  const tableCount = sheets.filter((sheet) => sheet.status === "imported" || sheet.status === "no-data").length;
+  return { import_id: crypto.randomUUID(), filename, cases, sheets, warnings: cases.length ? [] : ["No test cases were detected."], explanation: [`Scanned ${sheets.length} sheet(s) for table-like regions and recognized ${tableCount} table(s).`, "Matched known aliases and preserved unmatched columns.", "Nothing leaves the browser until you ask DeepSeek to interpret a correction."] };
 }
 
 async function deepSeekCaseChange(message, preview) {
@@ -1365,7 +1520,7 @@ function ImportAgentModal({ onClose, onImported }) {
         </div>}
 
         {stage === "preview" && preview && <div className="import-preview-body">
-          <section className="import-summary-strip"><span><strong>{preview.cases.length}</strong> cases</span><i /><span><strong>{preview.sheets.filter((sheet) => sheet.status === "imported").length}</strong> sheets</span><i /><span className={preview.cases.some((item) => item.warnings.length) ? "has-warning" : ""}><strong>{preview.cases.filter((item) => item.warnings.length).length}</strong> need attention</span></section>
+          <section className="import-summary-strip"><span><strong>{preview.cases.length}</strong> cases</span><i /><span><strong>{new Set(preview.sheets.filter((sheet) => sheet.status === "imported").map((sheet) => sheet.name)).size}</strong> sheets</span><i /><span className={preview.cases.some((item) => item.warnings.length) ? "has-warning" : ""}><strong>{preview.cases.filter((item) => item.warnings.length).length}</strong> need attention</span></section>
           <section className="agent-workspace">
             <div className="agent-explanation"><div className="agent-avatar"><Robot size={18} weight="duotone" /></div><div><div className="agent-workspace-title"><strong>How I handled this file</strong><span className="draft-badge">Draft</span></div>{preview.explanation.map((line) => <p key={line}>{line}</p>)}</div></div>
             <div className="agent-refine-intro"><strong>Review or correct my work</strong><span>Tell me what to change below. Nothing is imported until you confirm.</span></div>
@@ -1376,9 +1531,9 @@ function ImportAgentModal({ onClose, onImported }) {
           <div className="case-preview-heading"><div><strong>Parsed test cases</strong><span>Review all {preview.cases.length} rows before import</span></div><span>{preview.cases.length} cases</span></div>
           <div className="case-preview-table"><table><thead><tr><th>#</th><th>Source</th><th>Case ID</th><th>Description</th><th>Type</th><th>Priority</th><th>Extra fields</th></tr></thead><tbody>{preview.cases.map((item) => <tr key={`${item.source_sheet}-${item.source_row}`}><td>{item.import_order}</td><td>{item.source_sheet} · {item.source_row}</td><td>{item.case_id}</td><td>{item.description || "—"}</td><td>{item.case_type}</td><td>{item.priority}</td><td><ExtraFieldsPreview fields={item.extra_fields} /></td></tr>)}</tbody></table></div>
           <div className="sheet-report-heading"><strong>Source sheets & field mappings</strong><span>Collapsed to prioritize case review</span></div>
-          <div className="sheet-report-list">{preview.sheets.map((sheet) => <details key={sheet.name}>
-            <summary><span><FileText size={16} /><strong>{sheet.name}</strong></span><StatusPill tone={sheet.status === "imported" ? "success" : "neutral"}>{sheet.status === "imported" ? `${sheet.row_count} cases` : "Skipped"}</StatusPill></summary>
-            {sheet.status === "imported" ? <div className="mapping-chips">{sheet.mappings.map((mapping) => <span key={mapping.source_column}><b>{mapping.source_column}</b><CaretRight size={12} /><em>{mapping.target_field || "extra_fields"}</em><MappingQuality mapping={mapping} /></span>)}</div> : <p className="sheet-skip-reason">{sheet.reason}</p>}
+          <div className="sheet-report-list">{preview.sheets.map((sheet) => <details key={`${sheet.name}#${sheet.table_index ?? 1}`}>
+            <summary><span><FileText size={16} /><strong>{sheet.name}{(sheet.table_index ?? 1) > 1 ? ` · Table ${sheet.table_index}` : ""}</strong></span><StatusPill tone={sheet.status === "imported" ? "success" : sheet.status === "no-data" ? "warning" : "neutral"}>{sheet.status === "imported" ? `${sheet.row_count} cases` : sheet.status === "no-data" ? "No data" : "Skipped"}</StatusPill></summary>
+            {sheet.status === "skipped" ? <p className="sheet-skip-reason">{sheet.reason}</p> : <>{sheet.reason && <p className="sheet-skip-reason">{sheet.reason}</p>}<div className="mapping-chips">{sheet.mappings.map((mapping) => <span key={mapping.source_column}><b>{mapping.source_column}</b><CaretRight size={12} /><em>{mapping.target_field || "extra_fields"}</em><MappingQuality mapping={mapping} /></span>)}</div></>}
           </details>)}</div>
         </div>}
 
@@ -1388,6 +1543,583 @@ function ImportAgentModal({ onClose, onImported }) {
         </div>
       </section>
     </div>
+  );
+}
+
+const localPlatformHints = (text) => [
+  ...(/web|browser|网页|浏览器|网站/i.test(text) ? ["Web"] : []),
+  ...(/api|rest|endpoint|接口|http/i.test(text) ? ["API"] : []),
+  ...(/mobile|ios|android|移动|手机|app/i.test(text) ? ["Mobile"] : []),
+];
+
+function buildLocalCases(text, answers, sourceLabel) {
+  const requirements = text
+    .split(/\n+|(?<=[.!?。！？])\s+/)
+    .map((line) => line.replace(/^[-*#\d.()、\s]+/, "").trim())
+    .filter((line) => line.length >= 18)
+    .slice(0, 8);
+  if (!requirements.length) throw new Error("No testable requirements were found in this document.");
+  const platforms = localPlatformHints(text);
+  const platform = answers.platform || (platforms[0] || "Web");
+  const priorityHint = /critical|最高|p0/i.test(text) ? "P0" : /low|低优|p2/i.test(text) ? "P2" : "P1";
+  const priority = /p0/i.test(String(answers.priority || "")) ? "P0" : /p2/i.test(String(answers.priority || "")) ? "P2" : priorityHint;
+  const cases = requirements.map((requirement, index) => ({
+    title: requirement.length > 86 ? `${requirement.slice(0, 83)}…` : requirement,
+    case_type: /api|endpoint|接口/i.test(requirement) || platform === "API" ? "API" : /mobile|ios|android|移动/i.test(requirement) || platform === "Mobile" ? "Mobile" : "Web",
+    priority: index === 0 ? priority : priority === "P0" ? "P1" : priority,
+    preconditions: "The user has access to the target environment.",
+    test_steps: `1. Open the relevant feature\n2. Perform the behavior described in the requirement\n3. Observe the system response`,
+    expected_result: `The system satisfies the documented requirement: ${requirement}`,
+    requirement,
+  }));
+  return {
+    session_id: crypto.randomUUID(),
+    status: "generated",
+    message: `Generated ${cases.length} case draft${cases.length === 1 ? "" : "s"} for your review.`,
+    summary: `Found ${requirements.length} testable requirement${requirements.length === 1 ? "" : "s"} for ${sourceLabel}. Review and edit the table before adding anything to your inventory.`,
+    cases,
+  };
+}
+
+function startLocalGeneration(text, sourceLabel) {
+  const questions = [];
+  const platforms = localPlatformHints(text);
+  if (!platforms.length) {
+    questions.push({ id: "platform", question: "Which platform should the test cases target?", options: ["Web", "API", "Mobile"] });
+  }
+  if (!/priority|优先级|p0|p1|p2|critical|高优/i.test(text)) {
+    questions.push({ id: "priority", question: "How important is the most critical flow?", options: ["P0 — must not break", "P1 — high", "P2 — normal"] });
+  }
+  if (questions.length) {
+    return {
+      session_id: crypto.randomUUID(),
+      status: "asking",
+      message: `I found ${text.split(/\n+/).filter((line) => line.trim().length >= 18).length} testable requirement line(s) in ${sourceLabel}. Before I build the suite, a couple of details would make the coverage accurate.`,
+      questions,
+    };
+  }
+  return buildLocalCases(text, {}, sourceLabel);
+}
+
+function continueLocalGeneration(text, answers, message, sourceLabel) {
+  return buildLocalCases(text, answers, sourceLabel);
+}
+
+const chineseToInt = (raw) => {
+  const digits = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (digits[raw] != null) return digits[raw];
+  if (raw === "十") return 10;
+  if (raw.startsWith("十")) return 10 + (digits[raw[1]] ?? 0);
+  const tenAt = raw.indexOf("十");
+  if (tenAt > 0 && digits[raw[0]] != null) {
+    const tail = raw.slice(tenAt + 1);
+    return digits[raw[0]] * 10 + (tail ? (digits[tail] ?? 0) : 0);
+  }
+  return null;
+};
+
+const extractCaseOrdinal = (message) => {
+  const cn = String(message).match(/第\s*([一二两三四五六七八九十百\d]+)\s*(?:条|个|号)/);
+  if (cn) return /^\d+$/.test(cn[1]) ? Number(cn[1]) : chineseToInt(cn[1]);
+  const en = String(message).match(/(?:case|row|用例)\s*#?\s*(\d+)/i);
+  if (en) return Number(en[1]);
+  const enCn = String(message).match(/(?:case|用例)\s*([一二两三四五六七八九十]+)/i);
+  if (enCn) return chineseToInt(enCn[1]);
+  return null;
+};
+
+function continueLocalDraft(cases, requirementsText, message) {
+  const lower = String(message || "").toLowerCase();
+  const mention = (pattern) => pattern.test(lower);
+  if (mention(/explain|explanation|解释|说明|what does|describe|介绍/i)) {
+    const index = (extractCaseOrdinal(message) ?? 1) - 1;
+    const target = index >= 0 && index < cases.length ? cases[index] : null;
+    return {
+      session_id: crypto.randomUUID(),
+      status: "working",
+      action: "reply",
+      message: target
+        ? `Case ${index + 1} — ${target.title}\nType: ${target.case_type} · Priority: ${target.priority}\nPreconditions: ${target.preconditions || "—"}\nTest steps:\n${target.test_steps}\nExpected result: ${target.expected_result}\nRequirement: ${target.requirement || "—"}`
+        : `This draft has ${cases.length} case(s). Tell me which one to explain (for example “explain case 2”), or ask me to add, change or remove cases.`,
+    };
+  }
+  if (mention(/remove|delete|删|移除|去掉/i)) {
+    const index = (extractCaseOrdinal(message) ?? -1) - 1;
+    if (index >= 0 && index < cases.length) {
+      const removed = cases[index].title;
+      return {
+        session_id: crypto.randomUUID(),
+        status: "working",
+        action: "update",
+        message: `Removed case ${index + 1} — ${removed}.`,
+        cases: cases.filter((_, itemIndex) => itemIndex !== index),
+      };
+    }
+    return { session_id: crypto.randomUUID(), status: "working", action: "reply", message: "Tell me which case to remove, for example “remove case 2” or “删掉第2条”." };
+  }
+  if (mention(/add|增加|补充|edge|边界|new case/i)) {
+    const platform = /api|接口/i.test(requirementsText) ? "API" : /mobile|移动|手机/i.test(requirementsText) ? "Mobile" : "Web";
+    const extra = {
+      title: "Additional edge case",
+      case_type: platform,
+      priority: "P2",
+      preconditions: "",
+      test_steps: "1. Reproduce the boundary or unusual condition\n2. Observe the system response",
+      expected_result: "The system handles the edge condition gracefully.",
+      requirement: "Edge coverage requested by the author",
+    };
+    return {
+      session_id: crypto.randomUUID(),
+      status: "working",
+      action: "update",
+      message: "Added an edge-case draft you can edit in the table. On the live API the agent tailors this to your requirements.",
+      cases: [...cases, extra],
+    };
+  }
+  return {
+    session_id: crypto.randomUUID(),
+    status: "working",
+    action: "reply",
+    message: "On this static preview I can explain a case (“explain case 2”), remove one (“remove case 3” / “删掉第3条”) or add an edge case (“add an edge case”). For detailed edits, run the app with the API service or edit the table cells directly.",
+  };
+}
+
+async function streamGenerationRequest(path, { form, json, onThinking }) {
+  const apiKey = window.localStorage.getItem(API_KEY_STORAGE)?.trim();
+  const headers = new Headers();
+  if (apiKey) headers.set("X-DeepSeek-API-Key", apiKey);
+  if (json) headers.set("Content-Type", "application/json");
+  const response = await fetch(`${API_ORIGIN}${path}`, { method: "POST", headers, body: form || (json ? JSON.stringify(json) : undefined) });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail || "The agent could not complete the request.");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let thinking = "";
+  let result = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop();
+    for (const frame of frames) {
+      const lines = frame.split("\n");
+      let event = "message";
+      let data = "";
+      for (const line of lines) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      const payload = JSON.parse(data);
+      if (event === "thinking") {
+        thinking = payload.text || "";
+        onThinking?.(thinking);
+      } else if (event === "error") {
+        throw new Error(payload.detail || "The agent could not complete the request.");
+      } else if (event === "result") {
+        result = payload;
+      }
+    }
+  }
+  if (!result) throw new Error("The agent returned no result.");
+  return result;
+}
+
+function CaseGenerationPage({ cases, onAdd, onToast }) {
+  const inputRef = useRef(null);
+  const [stage, setStage] = useState("input");
+  const [inputMode, setInputMode] = useState("text");
+  const [text, setText] = useState("");
+  const [sourceLabel, setSourceLabel] = useState("");
+  const [sessionId, setSessionId] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [questions, setQuestions] = useState([]);
+  const [answers, setAnswers] = useState({});
+  const [composer, setComposer] = useState("");
+  const [draft, setDraft] = useState(null);
+  const [selected, setSelected] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const [liveThinking, setLiveThinking] = useState("");
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const autoSubmitRef = useRef(false);
+  const submittingRef = useRef(false);
+  const clarifyRoundsRef = useRef(0);
+
+  useEffect(() => {
+    if (!reviewOpen) return undefined;
+    const onKey = (event) => { if (event.key === "Escape") setReviewOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [reviewOpen]);
+
+  function reset() {
+    setStage("input");
+    setInputMode("text");
+    setText("");
+    setSourceLabel("");
+    setSessionId(null);
+    setMessages([]);
+    setQuestions([]);
+    setAnswers({});
+    setComposer("");
+    setDraft(null);
+    setSelected([]);
+    setBusy(false);
+    setError("");
+    setLiveThinking("");
+    setReviewOpen(false);
+    autoSubmitRef.current = false;
+    submittingRef.current = false;
+    clarifyRoundsRef.current = 0;
+  }
+
+  function handleTurn(response, label, reasoning = "") {
+    if (response?.session_id) setSessionId(response.session_id);
+    setSourceLabel(label);
+    setLiveThinking("");
+    const action = response?.action || (response?.status === "asking" ? "ask" : "generate");
+    if (action === "ask") {
+      setMessages((current) => [...current, { role: "agent", content: response.message, reasoning }]);
+      setQuestions(response.questions || []);
+      setAnswers({});
+      setComposer("");
+      autoSubmitRef.current = false;
+      submittingRef.current = false;
+      clarifyRoundsRef.current += 1;
+      setReviewOpen(false);
+      setStage("chat");
+      return;
+    }
+    // reply / generate / update all keep the conversation visible and land on the results table.
+    const previousLen = draft?.cases?.length || 0;
+    setQuestions([]);
+    setAnswers({});
+    setComposer("");
+    setMessages((current) => [...current, { role: "agent", content: response.message, reasoning }]);
+    if (action === "reply") {
+      setStage("results");
+      return;
+    }
+    const nextCases = response?.cases || [];
+    setDraft({ summary: response?.summary || draft?.summary || "", cases: nextCases });
+    setSelected((current) => {
+      const kept = current.filter((index) => index < nextCases.length);
+      for (let index = previousLen; index < nextCases.length; index += 1) kept.push(index);
+      return kept;
+    });
+    clarifyRoundsRef.current = 0;
+    setStage("results");
+  }
+
+  async function startFromText() {
+    const content = text.trim();
+    if (!content || busy) return;
+    setBusy(true);
+    setError("");
+    setLiveThinking("");
+    let thinking = "";
+    try {
+      let response;
+      if (IS_GITHUB_PAGES) {
+        response = startLocalGeneration(content, "Pasted requirements");
+      } else {
+        const form = new FormData();
+        form.append("text", content);
+        response = await streamGenerationRequest("/api/generation/sessions/stream", { form, onThinking: (chunk) => { thinking = chunk; setLiveThinking(chunk); } });
+      }
+      handleTurn(response, "Pasted requirements", thinking);
+    } catch (uploadError) {
+      setError(uploadError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function upload(file) {
+    if (!file) return;
+    setSourceLabel(file.name);
+    setBusy(true);
+    setError("");
+    setLiveThinking("");
+    let thinking = "";
+    try {
+      let response;
+      if (IS_GITHUB_PAGES) {
+        if (!/\.(txt|md)$/i.test(file.name)) throw new Error("PDF and Word generation requires the API service. Upload .txt or .md on this static preview.");
+        const content = await file.text();
+        setText(content); // keep the source text so follow-up questions can generate from it
+        response = startLocalGeneration(content, file.name);
+      } else {
+        const form = new FormData();
+        form.append("file", file);
+        response = await streamGenerationRequest("/api/generation/sessions/stream", { form, onThinking: (chunk) => { thinking = chunk; setLiveThinking(chunk); } });
+      }
+      handleTurn(response, file.name, thinking);
+    } catch (uploadError) {
+      setError(uploadError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitAnswers(overrideMessage) {
+    if (submittingRef.current || busy) return;
+    const freeText = (overrideMessage ?? composer).trim();
+    const answerList = Object.entries(answers)
+      .filter(([, value]) => String(value).trim())
+      .map(([question_id, answer]) => ({ question_id, answer: String(answer).trim() }));
+    if (!freeText && !answerList.length) return;
+    submittingRef.current = true;
+    setBusy(true);
+    setError("");
+    setLiveThinking("");
+    setMessages((current) => [...current, { role: "user", content: freeText || answerList.map((item) => item.answer).join(", ") }]);
+    let thinking = "";
+    try {
+      let response;
+      if (IS_GITHUB_PAGES) {
+        response = continueLocalGeneration(text, answers, freeText, sourceLabel);
+      } else {
+        response = await streamGenerationRequest(`/api/generation/sessions/${sessionId}/chat/stream`, {
+          json: { message: freeText, answers: answerList },
+          onThinking: (chunk) => { thinking = chunk; setLiveThinking(chunk); },
+        });
+      }
+      handleTurn(response, sourceLabel, thinking);
+    } catch (chatError) {
+      setError(chatError.message);
+    } finally {
+      setBusy(false);
+      submittingRef.current = false;
+    }
+  }
+
+  // Once every pending question has an answer, continue automatically — no extra click needed.
+  useEffect(() => {
+    if (stage !== "chat" || busy || !questions.length || autoSubmitRef.current) return;
+    const allAnswered = questions.every((question) => String(answers[question.id] || "").trim());
+    if (!allAnswered) return;
+    const timer = setTimeout(() => {
+      autoSubmitRef.current = true;
+      submitAnswers();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [answers, questions, busy, stage]);
+
+  // Post-generation interaction: the author keeps chatting about the generated draft.
+  async function continueDraft(text) {
+    const outgoing = (text ?? composer).trim();
+    if (!outgoing || busy) return;
+    setComposer("");
+    setMessages((current) => [...current, { role: "user", content: outgoing }]);
+    setBusy(true);
+    setError("");
+    setLiveThinking("");
+    let thinking = "";
+    try {
+      let response;
+      if (IS_GITHUB_PAGES) {
+        response = continueLocalDraft(draft.cases, text, outgoing);
+      } else {
+        response = await streamGenerationRequest(`/api/generation/sessions/${sessionId}/chat/stream`, {
+          json: { message: outgoing, cases: draft.cases },
+          onThinking: (chunk) => { thinking = chunk; setLiveThinking(chunk); },
+        });
+      }
+      handleTurn(response, sourceLabel, thinking);
+    } catch (chatError) {
+      setError(chatError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function updateCase(index, field, value) {
+    setDraft((current) => ({ ...current, cases: current.cases.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item) }));
+  }
+
+  function addSelected() {
+    const chosen = draft.cases.filter((_, index) => selected.includes(index));
+    const firstId = Math.max(0, ...cases.map((item) => Number(item.id) || 0)) + 1;
+    onAdd(chosen.map((item, index) => ({
+      id: firstId + index,
+      case_id: `GEN-${firstId + index}`,
+      title: item.title,
+      description: item.title,
+      case_type: item.case_type,
+      priority: item.priority,
+      preconditions: item.preconditions,
+      test_steps: item.test_steps,
+      test_data: "",
+      expected_result: item.expected_result,
+      automation: "Manual",
+      status: "Draft",
+      test_set: "Not assigned",
+      updated_at: "Just now",
+      extra_fields: { "Source document": sourceLabel, Requirement: item.requirement },
+    })));
+    onToast(`${chosen.length} generated test case${chosen.length === 1 ? "" : "s"} added as drafts.`);
+    reset();
+  }
+
+  const allSelected = draft?.cases.length > 0 && selected.length === draft.cases.length;
+  const answeredCount = Object.values(answers).filter((value) => String(value).trim()).length;
+  const allAnswered = questions.length > 0 && questions.every((question) => String(answers[question.id] || "").trim());
+
+  // Shared workspace used both in the results view and the fullscreen review modal.
+  const resultsWorkspace = draft ? (
+    <div className="gen-results-workspace">
+      <div className="case-preview-table gen-edit-table">
+        <table>
+          <thead><tr><th><input type="checkbox" checked={allSelected} onChange={() => setSelected(allSelected ? [] : draft.cases.map((_, index) => index))} aria-label="Select all generated cases" /></th><th>#</th><th>Title</th><th>Type</th><th>Priority</th><th>Preconditions</th><th>Test steps</th><th>Expected result</th><th>Requirement</th></tr></thead>
+          <tbody>{draft.cases.map((item, index) => (
+            <tr key={index} className={selected.includes(index) ? "selected-row" : ""}>
+              <td><input type="checkbox" checked={selected.includes(index)} onChange={() => setSelected((current) => current.includes(index) ? current.filter((value) => value !== index) : [...current, index])} aria-label={`Select generated case ${index + 1}`} /></td>
+              <td><span className="gen-row-index">{String(index + 1).padStart(2, "0")}</span></td>
+              <td><input className="gen-cell gen-cell-title" value={item.title} onChange={(event) => updateCase(index, "title", event.target.value)} aria-label={`Title of case ${index + 1}`} /></td>
+              <td><select className="gen-cell" value={item.case_type} onChange={(event) => updateCase(index, "case_type", event.target.value)} aria-label={`Type of case ${index + 1}`}><option>Web</option><option>API</option><option>Mobile</option></select></td>
+              <td><select className="gen-cell gen-cell-priority" value={item.priority} onChange={(event) => updateCase(index, "priority", event.target.value)} aria-label={`Priority of case ${index + 1}`}><option>P0</option><option>P1</option><option>P2</option></select></td>
+              <td><input className="gen-cell" value={item.preconditions || ""} onChange={(event) => updateCase(index, "preconditions", event.target.value)} aria-label={`Preconditions of case ${index + 1}`} /></td>
+              <td><textarea className="gen-cell gen-cell-steps" rows={4} value={item.test_steps || ""} onChange={(event) => updateCase(index, "test_steps", event.target.value)} aria-label={`Test steps of case ${index + 1}`} /></td>
+              <td><textarea className="gen-cell" rows={4} value={item.expected_result || ""} onChange={(event) => updateCase(index, "expected_result", event.target.value)} aria-label={`Expected result of case ${index + 1}`} /></td>
+              <td><input className="gen-cell" value={item.requirement || ""} onChange={(event) => updateCase(index, "requirement", event.target.value)} aria-label={`Source requirement of case ${index + 1}`} /></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      <aside className="gen-chat-side">
+        <div className="gen-chat-side-heading"><span><Robot size={18} weight="duotone" /></span><div><strong>Continue with the agent</strong><small>Explain, edit, add or remove cases</small></div></div>
+        <div className="chat-messages gen-side-messages">
+          {messages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div>{item.role === "agent" && item.reasoning ? <details className="gen-thinking"><summary>AI thinking process</summary><pre>{item.reasoning}</pre></details> : null}<p>{item.content}</p></div></div>)}
+          {busy && <div className="chat-message agent"><span><Robot size={16} /></span><div>{liveThinking ? <details className="gen-thinking live" open><summary>AI is thinking…</summary><pre>{liveThinking}</pre></details> : <p>The agent is working…</p>}</div></div>}
+        </div>
+        {error && <div className="gen-chat-error"><Warning size={15} /><span>{error}</span></div>}
+        <div className="chat-suggestions">
+          <button onClick={() => continueDraft("Explain case 1 — what does it verify and how?")}>Explain case 1</button>
+          <button onClick={() => continueDraft("Add important edge cases that are missing from the suite")}>Add edge cases</button>
+          <button onClick={() => continueDraft("Remove duplicate or redundant cases")}>Remove duplicates</button>
+        </div>
+        <div className="chat-composer">
+          <textarea value={composer} onChange={(event) => setComposer(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); continueDraft(); } }} disabled={busy} placeholder="Ask the agent to explain, change, add or remove cases…" />
+          <button className="primary-button" disabled={busy || !composer.trim()} onClick={() => continueDraft()}><PaperPlaneTilt size={17} weight="fill" /> Send</button>
+        </div>
+      </aside>
+    </div>
+  ) : null;
+
+  return (
+    <>
+      <PageHeader eyebrow="AI authoring" title="Generate test cases" description="Paste your product requirements or upload a specification. The agent asks only for the details it needs, then drafts reviewable test cases you can edit before adding them to your inventory." />
+      {stage === "input" && <section className="generator-layout">
+        <div className="panel generator-upload-panel">
+          <div className="generator-intro"><span className="generator-orb"><Sparkle size={24} weight="duotone" /></span><div><span className="panel-kicker">Document to test suite</span><h2>Start with your requirements</h2><p>Requirements stay in a draft workflow so you can review coverage, steps and expected results first.</p></div></div>
+          <div className="gen-source-tabs">
+            <button className={inputMode === "text" ? "active" : ""} onClick={() => setInputMode("text")}><PencilSimple size={16} /> Paste requirements</button>
+            <button className={inputMode === "upload" ? "active" : ""} onClick={() => setInputMode("upload")}><UploadSimple size={16} /> Upload document</button>
+          </div>
+          {inputMode === "text" ? (
+            <div className="gen-text-area">
+              <textarea value={text} onChange={(event) => setText(event.target.value)} rows={9} disabled={busy}
+                placeholder={"Paste your product requirements here, for example:\nUsers can sign in with an email and password.\nThe password must be at least 8 characters.\nFailed attempts lock the account after 5 tries."} />
+              <div className="gen-text-actions"><span>{text.length.toLocaleString()} characters</span><button className="primary-button" disabled={busy || !text.trim()} onClick={startFromText}><Sparkle size={16} /> {busy ? "Analyzing…" : "Generate cases"}</button></div>
+            </div>
+          ) : (
+            <>
+              <button
+                className={`generator-dropzone ${dragging ? "dragging" : ""}`}
+                disabled={busy}
+                onClick={() => inputRef.current?.click()}
+                onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={(event) => { event.preventDefault(); setDragging(false); upload(event.dataTransfer.files?.[0]); }}
+              >
+                <span><UploadSimple size={28} weight="duotone" /></span>
+                <strong>{busy ? `Analyzing ${sourceLabel}…` : "Drop a document here, or choose a file"}</strong>
+                <small>PDF, DOCX, Markdown or TXT · maximum readable content 45,000 characters</small>
+              </button>
+              <input ref={inputRef} type="file" accept=".pdf,.docx,.md,.txt" hidden onChange={(event) => upload(event.target.files?.[0])} />
+            </>
+          )}
+          {error && <div className="import-error generator-error"><Warning size={17} /><span>{error}</span></div>}
+        </div>
+        <aside className="panel generator-guidance">
+          <span className="panel-kicker">What happens</span>
+          <h2>Interactive coverage</h2>
+          <div><CheckCircle size={18} /><span><strong>Only what it needs</strong><small>Missing platform or priority? The agent asks instead of guessing.</small></span></div>
+          <div><CheckCircle size={18} /><span><strong>Editable table</strong><small>Generated cases open as a spreadsheet you can edit cell by cell.</small></span></div>
+          <div><CheckCircle size={18} /><span><strong>Source traceability</strong><small>Each draft retains its originating requirement and filename.</small></span></div>
+        </aside>
+      </section>}
+
+      {stage === "chat" && <section className="panel gen-chat-panel">
+        <div className="gen-chat-header">
+          <div><span className="generator-file-icon"><Robot size={21} weight="duotone" /></span><div><span className="panel-kicker">Interactive generation</span><h2>{sourceLabel}</h2><p>Answer the agent's questions — it only asks for details that change the suite.</p></div></div>
+          <button className="secondary-button" onClick={reset}><ArrowClockwise size={16} /> Start over</button>
+        </div>
+        <div className="gen-chat-body">
+          <div className="chat-messages">
+            {messages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div>{item.role === "agent" && item.reasoning ? <details className="gen-thinking"><summary>AI thinking process</summary><pre>{item.reasoning}</pre></details> : null}<p>{item.content}</p></div></div>)}
+            {questions.length > 0 && (
+              <div className="gen-question-card">
+                <div className="gen-question-heading"><span><Robot size={17} weight="duotone" /></span><div><strong>I need a few details</strong><small>Answer below or pick an option — it continues automatically once all are answered.</small></div></div>
+                {questions.map((question) => (
+                  <label className="gen-question" key={question.id}>
+                    <span>{question.question}</span>
+                    {question.options?.length ? (
+                      <div className="gen-option-group">{question.options.map((option) => (
+                        <label key={option} className={answers[question.id] === option ? "checked" : ""}><input type="radio" name={question.id} checked={answers[question.id] === option} onChange={() => setAnswers((current) => ({ ...current, [question.id]: option }))} /><span>{option}</span></label>
+                      ))}</div>
+                    ) : (
+                      <input value={answers[question.id] || ""} onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: event.target.value }))} placeholder="Type your answer…" />
+                    )}
+                  </label>
+                ))}
+                <div className="gen-question-actions"><span>{answeredCount} of {questions.length} answered</span>{allAnswered && !busy ? <span className="gen-auto-hint"><Pulse size={14} weight="fill" /> All answered — continuing automatically…</span> : <button className="secondary-button compact" disabled={busy} onClick={() => submitAnswers("Use your best judgment for the remaining details.")}>Skip — use best judgment</button>}</div>
+              </div>
+            )}
+            {busy && <div className="chat-message agent"><span><Robot size={16} /></span><div>{liveThinking ? <details className="gen-thinking live" open><summary>AI is thinking…</summary><pre>{liveThinking}</pre></details> : <p>The agent is working…</p>}</div></div>}
+          </div>
+          {error && <div className="gen-chat-error"><Warning size={15} /><span>{error}</span></div>}
+          <div className="chat-composer">
+            <textarea value={composer} onChange={(event) => setComposer(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitAnswers(); } }} disabled={busy} placeholder="Or tell the agent anything else it should know…" />
+            <button className="primary-button" disabled={busy || (!composer.trim() && !answeredCount)} onClick={() => submitAnswers()}><PaperPlaneTilt size={17} weight="fill" /> {busy ? "Working…" : questions.length ? "Submit answers" : "Send"}</button>
+          </div>
+        </div>
+      </section>}
+
+      {stage === "results" && draft && <section className="panel generator-results">
+        <div className="generator-result-header">
+          <div><span className="generator-file-icon"><FileText size={21} weight="duotone" /></span><div><span className="panel-kicker">Generation complete</span><h2>{sourceLabel}</h2><p>{draft.summary}</p></div></div>
+          <div className="generator-header-actions"><button className="secondary-button" onClick={() => setReviewOpen(true)}><ArrowsOut size={16} /> Review fullscreen</button><button className="secondary-button" onClick={reset}><ArrowClockwise size={16} /> Start over</button></div>
+        </div>
+        <div className="generator-toolbar">
+          <label><input type="checkbox" checked={allSelected} onChange={() => setSelected(allSelected ? [] : draft.cases.map((_, index) => index))} /><strong>{selected.length} of {draft.cases.length} selected</strong></label>
+          <span>Edit any cell, or keep asking the agent to explain, change, add or remove cases — your edits are kept.</span>
+        </div>
+        {resultsWorkspace}
+        <div className="generator-actions"><span><Info size={16} /> Only selected cases will be added.</span><button className="primary-button" disabled={!selected.length} onClick={addSelected}><Plus size={17} /> Add {selected.length} to Test cases</button></div>
+      </section>}
+
+      {reviewOpen && draft && (
+        <div className="modal-layer review-layer" role="dialog" aria-modal="true">
+          <button className="modal-backdrop" onClick={() => setReviewOpen(false)} aria-label="Exit review mode" />
+          <section className="review-modal">
+            <div className="review-header">
+              <div className="review-title"><span className="review-orb"><ArrowsOut size={19} weight="duotone" /></span><div><span className="panel-kicker">Review mode</span><h2>{sourceLabel}</h2><p>{draft.summary}</p></div></div>
+              <div className="review-header-actions"><span className="review-hint"><Info size={15} /> Edits and chat are shared with the page view.</span><button className="secondary-button" onClick={() => setReviewOpen(false)}><ArrowsIn size={16} /> Exit review</button></div>
+            </div>
+            {resultsWorkspace}
+            <div className="generator-actions review-actions"><span><Info size={16} /> Only selected cases will be added.</span><button className="primary-button" disabled={!selected.length} onClick={addSelected}><Plus size={17} /> Add {selected.length} to Test cases</button></div>
+          </section>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1824,6 +2556,54 @@ function SettingsPage({ project, projects, projectMerges, setProjectMerges, onTo
 
 function RunModal({ target, type, applications, onClose, onStart }) {
   const isRerun = type === "Re-run";
+  const initialSettings = getLocalAgentSettings();
+  const [endpoint, setEndpoint] = useState(initialSettings.endpoint);
+  const [token, setToken] = useState(initialSettings.token);
+  const [agentState, setAgentState] = useState("checking");
+  const [agentError, setAgentError] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(!initialSettings.token);
+  const [submitting, setSubmitting] = useState(false);
+  const [application, setApplication] = useState(applications[0]?.name || "");
+  const [environment, setEnvironment] = useState("UAT");
+  const [captureScreenshots, setCaptureScreenshots] = useState(true);
+  const [instructions, setInstructions] = useState(`Execute the QA Orbit test: ${target}. Verify the expected outcome and report any failure with clear evidence.`);
+
+  async function verifyAgent(settings = { endpoint, token }) {
+    saveLocalAgentSettings(settings);
+    setAgentState("checking");
+    setAgentError("");
+    try {
+      await checkLocalAgent();
+      setAgentState("ready");
+      setAdvancedOpen(false);
+    } catch (error) {
+      setAgentState("offline");
+      setAgentError(error.message);
+    }
+  }
+
+  useEffect(() => {
+    if (initialSettings.token) verifyAgent(initialSettings);
+    else setAgentState("unpaired");
+  }, []); // Pairing is checked once when the dialog opens.
+
+  async function start() {
+    setSubmitting(true);
+    setAgentError("");
+    try {
+      await onStart({
+        title: `${type}: ${target}`,
+        prompt: `${instructions}\n\nApplication: ${application}\nEnvironment: ${environment}\nCapture screenshots on failure: ${captureScreenshots ? "yes" : "no"}`,
+        headless: false,
+        allowed_domains: [],
+      });
+    } catch (error) {
+      setAgentError(error.message);
+      setAgentState("offline");
+      setSubmitting(false);
+    }
+  }
+
   return (
     <div className="modal-layer" role="dialog" aria-modal="true">
       <button className="modal-backdrop" onClick={onClose} aria-label="Close run configuration" />
@@ -1832,12 +2612,15 @@ function RunModal({ target, type, applications, onClose, onStart }) {
         <div className="run-target"><div className="run-target-icon"><Play size={18} weight="fill" /></div><div><span>{type}</span><strong>{target}</strong></div></div>
         {isRerun && <div className="inline-notice"><Info size={18} /><span>Uses the latest case and script with the original application, build, environment and test data snapshot.</span></div>}
         <div className="modal-form">
-          <label><span>Application</span><select disabled={isRerun}>{applications.map((app) => <option key={app.id}>{app.name}</option>)}</select></label>
-          <div className="form-row"><label><span>Version / build</span><select disabled={isRerun}><option>v8.12.0-rc3</option><option>v8.12.0-rc2</option></select></label><label><span>Environment</span><select disabled={isRerun}><option>UAT</option><option>SIT</option><option>PROD-SIM</option></select></label></div>
+          <div className={`agent-connection ${agentState}`}><span className="agent-connection-dot" /><div><strong>{agentState === "ready" ? "Local Agent ready" : agentState === "checking" ? "Checking Local Agent…" : agentState === "unpaired" ? "Pair Local Agent" : "Local Agent unavailable"}</strong><small>{agentState === "ready" ? "Runs in a dedicated browser profile on this device." : agentError || "Open the desktop app and copy its pairing token."}</small></div><button type="button" onClick={() => setAdvancedOpen((open) => !open)}>{advancedOpen ? "Hide" : "Configure"}</button></div>
+          {advancedOpen && <div className="agent-pairing"><label><span>Agent endpoint</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="http://127.0.0.1:8765" /></label><label><span>Pairing token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste from QA Orbit Agent" /></label><button type="button" className="secondary-button compact" onClick={() => verifyAgent()}>Save & verify</button></div>}
+          <label><span>Application</span><select value={application} onChange={(event) => setApplication(event.target.value)} disabled={isRerun}>{applications.map((app) => <option key={app.id}>{app.name}</option>)}</select></label>
+          <div className="form-row"><label><span>Version / build</span><select disabled={isRerun}><option>v8.12.0-rc3</option><option>v8.12.0-rc2</option></select></label><label><span>Environment</span><select value={environment} onChange={(event) => setEnvironment(event.target.value)} disabled={isRerun}><option>UAT</option><option>SIT</option><option>PROD-SIM</option></select></label></div>
           <label><span>Test data</span><select disabled={isRerun}><option>CLAIMS_HAPPY_PATH_V3 · Data point 01</option><option>OCR_MULTI_PAGE_INVOICES · Data point 02</option></select></label>
-          <label className="checkbox-row"><input type="checkbox" defaultChecked /><span>Capture screenshots on failure</span></label>
+          <label><span>Agent instructions</span><textarea rows="4" value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label>
+          <label className="checkbox-row"><input type="checkbox" checked={captureScreenshots} onChange={(event) => setCaptureScreenshots(event.target.checked)} /><span>Capture screenshots on failure</span></label>
         </div>
-        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={onStart}><Play size={16} weight="fill" /> Start run</button></div>
+        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={agentState !== "ready" || submitting || !instructions.trim()} onClick={start}><Play size={16} weight="fill" /> {submitting ? "Sending…" : "Start on Local Agent"}</button></div>
       </section>
     </div>
   );
@@ -1927,6 +2710,7 @@ export function App() {
     plans: <PlansPage plans={data.plans} sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} planSets={data.planSets} planCases={data.planCases} planCaseExclusions={data.planCaseExclusions} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     sets: <SetsPage sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} setSetCaseMemberships={setSetCaseMemberships} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     cases: <CasesPage cases={caseRecords} setCases={setCaseRecords} dataSets={data.dataSets} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
+    generate: <CaseGenerationPage cases={caseRecords} onAdd={(generated) => { setCaseRecords((current) => [...current, ...generated]); setPage("cases"); }} onToast={setToast} />,
     data: <DataPage dataSets={data.dataSets} cases={caseRecords} setCases={setCaseRecords} onToast={setToast} />,
     apps: <AppsPage applications={data.applications} onToast={setToast} />,
     security: <SecurityPage securityRules={data.securityRules} onToast={setToast} />,
@@ -1940,7 +2724,7 @@ export function App() {
         <Topbar projects={data.projects} projectMerges={projectMerges} selectedSr={selectedSr} onSelectSr={handleSelectSr} archivedVisible={archivedVisible} setArchivedVisible={setArchivedVisible} />
         <main className="page-content">{pageContent}</main>
       </div>
-      {runModal && <RunModal target={runModal.target} type={runModal.type} applications={data.applications} onClose={() => setRunModal(null)} onStart={() => { setRunModal(null); setToast("Run R-4823 started. 12 case tasks were added to the queue."); setPage("runs"); }} />}
+      {runModal && <RunModal target={runModal.target} type={runModal.type} applications={data.applications} onClose={() => setRunModal(null)} onStart={async (run) => { const result = await submitLocalRun(run); setRunModal(null); setToast(`Local run ${result.task.id.slice(0, 8)} queued on this device.`); setPage("runs"); }} />}
       {toast && <div className="toast"><CheckCircle size={19} weight="fill" /><span>{toast}</span><button onClick={() => setToast("")} aria-label="Dismiss"><X size={16} /></button></div>}
     </div>
   );

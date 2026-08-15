@@ -72,11 +72,25 @@ class ImportedCase(BaseModel):
 
 class SheetReport(BaseModel):
     name: str
-    status: Literal["imported", "skipped"]
+    status: Literal["imported", "no-data", "skipped"]
     reason: str = ""
     header_row: int | None = None
     row_count: int = 0
     mappings: list[ColumnMapping] = Field(default_factory=list)
+    table_index: int = 1
+
+
+class LocatedTable(BaseModel):
+    """A table the model located inside a sheet, using 1-based sheet row numbers."""
+
+    header_row: int
+    first_data_row: int
+    last_data_row: int
+    columns: list[str]
+
+
+class TableLocationDecision(BaseModel):
+    tables: list[LocatedTable]
 
 
 class ImportPreview(BaseModel):
@@ -108,6 +122,59 @@ class CaseAssistRequest(BaseModel):
 class CaseAssistResponse(BaseModel):
     message: str
     changes: dict[str, str]
+
+
+class GeneratedCase(BaseModel):
+    title: str
+    case_type: Literal["Web", "API", "Mobile"] = "Web"
+    priority: Literal["P0", "P1", "P2"] = "P1"
+    preconditions: str = ""
+    test_steps: str
+    expected_result: str
+    requirement: str = ""
+
+
+class GenerationResponse(BaseModel):
+    filename: str
+    summary: str
+    cases: list[GeneratedCase]
+
+
+class GenerationQuestion(BaseModel):
+    id: str
+    question: str
+    options: list[str] = Field(default_factory=list)
+
+
+class GenerationDecision(BaseModel):
+    """One model turn in the interactive generation flow."""
+
+    action: Literal["ask", "generate", "reply", "update"]
+    message: str = ""
+    questions: list[GenerationQuestion] = Field(default_factory=list)
+    summary: str = ""
+    cases: list[GeneratedCase] = Field(default_factory=list)
+
+
+class GenerationTurnResponse(BaseModel):
+    session_id: str
+    status: Literal["asking", "generated", "working"]
+    action: Literal["ask", "generate", "reply", "update"] = "generate"
+    message: str
+    questions: list[GenerationQuestion] = Field(default_factory=list)
+    summary: str = ""
+    cases: list[GeneratedCase] = Field(default_factory=list)
+
+
+class GenerationAnswer(BaseModel):
+    question_id: str
+    answer: str = Field(max_length=2000)
+
+
+class GenerationChatRequest(BaseModel):
+    message: str = Field(default="", max_length=2000)
+    answers: list[GenerationAnswer] = Field(default_factory=list)
+    cases: list[GeneratedCase] = Field(default_factory=list)
 
 
 class Change(BaseModel):

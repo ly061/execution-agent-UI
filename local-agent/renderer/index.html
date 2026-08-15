@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:*; style-src 'self'; script-src 'self'" />
+    <title>QA Orbit Agent</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">Q</span><div><strong>QA Orbit</strong><small>Local Agent</small></div></div>
+        <nav>
+          <button class="nav-item active" data-view="runs"><span>◉</span>Runs</button>
+          <button class="nav-item" data-view="settings"><span>⌘</span>Connection</button>
+        </nav>
+        <div class="device"><span class="status-dot"></span><div><strong id="device-name">This device</strong><small id="runtime-label">Starting runtime…</small></div></div>
+      </aside>
+      <main>
+        <header><div><span class="eyebrow">Local execution</span><h1 id="view-title">Runs</h1></div><div class="connection-pill"><span class="status-dot"></span><span id="connection-text">Connecting</span></div></header>
+        <section id="runs-view" class="view active">
+          <div class="composer card">
+            <div class="composer-heading"><div><span class="eyebrow">BrowserUse</span><h2>Start a browser task</h2></div><span class="privacy">Isolated profile</span></div>
+            <textarea id="task-input" rows="4" placeholder="Describe the browser task, expected result, and any constraints…"></textarea>
+            <div class="composer-footer">
+              <label>Allowed domains <input id="domains-input" placeholder="example.com, *.example.com" /></label>
+              <label class="check"><input id="headed-input" type="checkbox" checked /> Show browser</label>
+              <button id="run-button" class="primary">Run task <span>→</span></button>
+            </div>
+          </div>
+          <div class="content-grid">
+            <section class="card tasks-card"><div class="section-heading"><div><span class="eyebrow">Activity</span><h2>Recent runs</h2></div><button id="refresh-button" class="icon-button" title="Refresh">↻</button></div><div id="task-list" class="task-list"></div></section>
+            <section class="card detail-card" id="detail-card"><div class="empty"><span>◎</span><strong>Select a run</strong><small>Status, live logs and workspace files appear here.</small></div></section>
+          </div>
+        </section>
+        <section id="settings-view" class="view">
+          <div class="card settings-card"><span class="eyebrow">Secure pairing</span><h2>Connect QA Orbit web</h2><p>The web app can submit runs only with this device token. The agent listens on this computer only.</p><label>Local endpoint<input id="endpoint" readonly /></label><label>Pairing token<div class="token-row"><input id="token" type="password" readonly /><button id="copy-token">Copy</button></div></label><div class="notice">The token is generated on every launch in this MVP. Persistent OS keychain storage and owner-bound server enrollment are the next security milestone.</div></div>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

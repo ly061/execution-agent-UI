@@ -178,6 +178,61 @@ test("imports, edits, undoes, and confirms cases through the deployed API", asyn
   assert.equal(confirmed.cases[0].title, "Login");
 });
 
+async function previewCsv(csv, filename = "cases.csv") {
+  const workbook = new FormData();
+  workbook.set("file", new File([csv], filename, { type: "text/csv" }));
+  const DB = {
+    prepare() {
+      return { bind() { return { async run() {}, async first() { return null; } }; } };
+    },
+  };
+  const response = await worker.fetch(new Request("https://example.test/api/imports/preview", { method: "POST", body: workbook }), { DB });
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
+test("finds a table located below the first 25 rows", async () => {
+  const junk = Array.from({ length: 30 }, (_, i) => `junk ${i}`).join("\n");
+  const preview = await previewCsv(`${junk}\nCase ID,Description,Steps,Expected Result\nL-1,Deep table,Do the thing,OK`);
+
+  assert.equal(preview.cases.length, 1);
+  assert.equal(preview.cases[0].case_id, "L-1");
+  assert.equal(preview.cases[0].source_row, 32);
+  assert.equal(preview.sheets[0].status, "imported");
+  assert.equal(preview.sheets[0].header_row, 31);
+});
+
+test("reports header-only sheets as no-data with their schema", async () => {
+  const preview = await previewCsv("Case ID,Description,Steps,Expected Result\n");
+
+  assert.equal(preview.cases.length, 0);
+  assert.equal(preview.sheets[0].status, "no-data");
+  assert.equal(preview.sheets[0].header_row, 1);
+  assert.ok(preview.sheets[0].mappings.length > 0);
+  assert.equal(preview.warnings.length, 1);
+});
+
+test("finds multiple tables in one sheet", async () => {
+  const preview = await previewCsv([
+    "Case ID,Description,Steps,Expected Result,Priority",
+    "T1-1,Login,Open,OK,P1",
+    "T1-2,Logout,Close,OK,P1",
+    "spacer",
+    "spacer",
+    "Case ID,Description,Steps,Expected Result",
+    "T2-1,Register,Sign up,OK",
+  ].join("\n"));
+
+  assert.equal(preview.sheets.length, 2);
+  assert.equal(preview.sheets[0].table_index, 1);
+  assert.equal(preview.sheets[0].row_count, 2);
+  assert.equal(preview.sheets[0].status, "imported");
+  assert.equal(preview.sheets[1].table_index, 2);
+  assert.equal(preview.sheets[1].row_count, 1);
+  assert.equal(preview.cases.length, 3);
+  assert.deepEqual(preview.cases.map((item) => item.case_id), ["T1-1", "T1-2", "T2-1"]);
+});
+
 test("emits the files required by Sites packaging", async () => {
   await access(new URL("../dist/client/index.html", import.meta.url));
   await access(new URL("../dist/server/index.js", import.meta.url));

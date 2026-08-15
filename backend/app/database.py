@@ -43,6 +43,16 @@ def init_db() -> None:
               role TEXT NOT NULL, content TEXT NOT NULL,
               created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS generation_sessions (
+              id TEXT PRIMARY KEY, source TEXT NOT NULL,
+              requirements_text TEXT NOT NULL, status TEXT NOT NULL,
+              state_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS generation_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+              role TEXT NOT NULL, content TEXT NOT NULL,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
 
@@ -169,5 +179,43 @@ def message_history(import_id: str, limit: int = 20) -> list[dict[str, str]]:
         rows = db.execute(
             "SELECT role, content FROM chat_messages WHERE import_id = ? ORDER BY id DESC LIMIT ?",
             (import_id, limit),
+        ).fetchall()
+    return [dict(row) for row in reversed(rows)]
+
+
+def create_generation_session(session_id: str, source: str, requirements_text: str, state: dict[str, Any]) -> None:
+    with connect() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO generation_sessions(id, source, requirements_text, status, state_json) VALUES(?,?,?,?,?)",
+            (session_id, source, requirements_text, state.get("status", "asking"), json.dumps(state, ensure_ascii=False)),
+        )
+
+
+def get_generation_session(session_id: str) -> sqlite3.Row | None:
+    with connect() as db:
+        return db.execute("SELECT * FROM generation_sessions WHERE id = ?", (session_id,)).fetchone()
+
+
+def update_generation_session(session_id: str, state: dict[str, Any]) -> None:
+    with connect() as db:
+        db.execute(
+            "UPDATE generation_sessions SET status = ?, state_json = ? WHERE id = ?",
+            (state.get("status", "asking"), json.dumps(state, ensure_ascii=False), session_id),
+        )
+
+
+def save_generation_message(session_id: str, role: str, content: str) -> None:
+    with connect() as db:
+        db.execute(
+            "INSERT INTO generation_messages(session_id, role, content) VALUES(?,?,?)",
+            (session_id, role, content),
+        )
+
+
+def generation_message_history(session_id: str, limit: int = 30) -> list[dict[str, str]]:
+    with connect() as db:
+        rows = db.execute(
+            "SELECT role, content FROM generation_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, limit),
         ).fetchall()
     return [dict(row) for row in reversed(rows)]

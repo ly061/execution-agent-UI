@@ -46,6 +46,80 @@ function headerScore(row) {
   return row.reduce((score, value) => score + (Object.values(FIELD_ALIASES).some((aliases) => aliases.includes(normalize(value))) ? 4 : 0), 0) + Math.min(row.filter(Boolean).length, 8) * 0.25;
 }
 
+const REGION_HEADER_WINDOW = 25;
+const HEADER_MIN_SCORE = 1;
+const DATA_OVERLAP_MIN = 0.5;
+
+function isActiveRow(row) {
+  return row.filter((value) => String(value ?? "").trim()).length >= 2;
+}
+
+function expandMergedCells(rows, sheet) {
+  const merges = sheet["!merges"] || [];
+  for (const merge of merges) {
+    const value = rows[merge.s.r]?.[merge.s.c];
+    if (value === undefined || value === null || String(value).trim() === "") continue;
+    for (let r = merge.s.r; r <= merge.e.r; r += 1) {
+      if (!rows[r]) rows[r] = [];
+      for (let c = merge.s.c; c <= merge.e.c; c += 1) rows[r][c] = value;
+    }
+  }
+}
+
+function tableRegions(rows) {
+  const member = rows.map(isActiveRow);
+  for (let i = 0; i < member.length; i += 1) {
+    if (!member[i] && i > 0 && i + 1 < member.length && member[i - 1] && member[i + 1]) member[i] = true;
+  }
+  const regions = [];
+  let start = -1;
+  for (let i = 0; i <= member.length; i += 1) {
+    const active = i < member.length && member[i];
+    if (active && start === -1) start = i;
+    else if (!active && start !== -1) { regions.push([start, i - 1]); start = -1; }
+  }
+  return regions;
+}
+
+function analyzeRegion(rows, start, end) {
+  const window = Math.min(end + 1, start + REGION_HEADER_WINDOW);
+  let headerIndex = -1;
+  let best = -Infinity;
+  for (let index = start; index < window; index += 1) {
+    const score = headerScore(rows[index]);
+    if (score > best) { best = score; headerIndex = index; }
+  }
+  if (best < HEADER_MIN_SCORE) return null;
+  const seen = new Map();
+  const headers = rows[headerIndex].map((value, index) => {
+    const base = String(value || `Column ${index + 1}`).trim();
+    const count = (seen.get(base) || 0) + 1;
+    seen.set(base, count);
+    return count > 1 ? `${base} (${count})` : base;
+  });
+  const headerColumns = [];
+  rows[headerIndex].forEach((value, index) => { if (String(value ?? "").trim()) headerColumns.push(index); });
+  const dataRows = [];
+  let aligned = false;
+  for (let sourceIndex = headerIndex + 1; sourceIndex <= end; sourceIndex += 1) {
+    const row = rows[sourceIndex];
+    if (!isActiveRow(row)) continue;
+    if (!aligned) {
+      const filled = headerColumns.filter((column) => String(row[column] ?? "").trim()).length;
+      if (headerColumns.length && filled / headerColumns.length < DATA_OVERLAP_MIN) continue;
+      aligned = true;
+    }
+    dataRows.push({ row, sourceIndex });
+  }
+  let reason = "";
+  if (!aligned) {
+    reason = rows.slice(headerIndex + 1, end + 1).some(isActiveRow)
+      ? "Header row found but rows below it do not align with the columns"
+      : "Header row found but no data rows below it";
+  }
+  return { headerIndex, headers, dataRows, reason };
+}
+
 function parseWorkbook(filename, bytes) {
   const workbook = XLSX.read(bytes, { type: "array" });
   const cases = [];
@@ -53,54 +127,60 @@ function parseWorkbook(filename, bytes) {
   let generated = 1;
   for (const sheetName of workbook.SheetNames) {
     const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false });
-    const candidates = rows.slice(0, 25).map((row, index) => [index, headerScore(row)]).sort((a, b) => b[1] - a[1]);
-    if (!candidates.length || candidates[0][1] < 1) {
-      sheets.push({ name: sheetName, status: "skipped", reason: "No tabular test case data detected", header_row: null, row_count: 0, mappings: [] });
+    expandMergedCells(rows, workbook.Sheets[sheetName]);
+    const tables = [];
+    for (const [start, end] of tableRegions(rows)) {
+      const table = analyzeRegion(rows, start, end);
+      if (table) tables.push(table);
+    }
+    if (!tables.length) {
+      sheets.push({ name: sheetName, status: "skipped", reason: "No tabular test case data detected", header_row: null, row_count: 0, mappings: [], table_index: 1 });
       continue;
     }
-    const headerIndex = candidates[0][0];
-    const seen = new Map();
-    const headers = rows[headerIndex].map((value, index) => {
-      const base = String(value || `Column ${index + 1}`).trim();
-      const count = (seen.get(base) || 0) + 1;
-      seen.set(base, count);
-      return count > 1 ? `${base} (${count})` : base;
-    });
-    const used = new Set();
-    const mappings = headers.map((header) => {
-      const mapping = mappingFor(header, used);
-      if (mapping.target_field) used.add(mapping.target_field);
-      return mapping;
-    });
-    const targetBySource = Object.fromEntries(mappings.map((item) => [item.source_column, item.target_field]));
-    let rowCount = 0;
-    rows.slice(headerIndex + 1).forEach((row, offset) => {
-      if (!row.some((value) => String(value).trim())) return;
-      const standard = {};
-      const extra_fields = {};
-      headers.forEach((header, index) => {
-        const value = row[index];
-        if (value === "" || value == null) return;
-        const target = targetBySource[header];
-        if (target) standard[target] = value;
-        else extra_fields[header] = value;
+    tables.forEach((table, tableOffset) => {
+      const used = new Set();
+      const mappings = table.headers.map((header) => {
+        const mapping = mappingFor(header, used);
+        if (mapping.target_field) used.add(mapping.target_field);
+        return mapping;
       });
-      if (!["description", "test_steps", "expected_result"].some((field) => String(standard[field] || "").trim())) return;
-      const rawId = String(standard.case_id || "").trim();
-      cases.push({
-        id: null,
-        case_id: rawId || `IMP-${String(generated++).padStart(4, "0")}`,
-        case_type: /api|接口/i.test(standard.case_type || "") ? "API" : /mobile|app|移动/i.test(standard.case_type || "") ? "Mobile" : "Web",
-        description: String(standard.description || "").trim(), preconditions: String(standard.preconditions || "").trim(),
-        test_steps: String(standard.test_steps || "").trim(), test_data: String(standard.test_data || "").trim(),
-        expected_result: String(standard.expected_result || "").trim(), priority: /high|critical|最高/i.test(standard.priority || "") ? "P0" : /low|低/i.test(standard.priority || "") ? "P2" : String(standard.priority || "P1").toUpperCase().match(/^P[0-2]$/)?.[0] || "P1",
-        extra_fields, source_file: filename, source_sheet: sheetName, source_row: headerIndex + offset + 2,
-        import_order: cases.length + 1, field_provenance: {}, mapping_confidence: 1,
-        warnings: rawId ? [] : ["Case ID was generated"],
+      const targetBySource = Object.fromEntries(mappings.map((item) => [item.source_column, item.target_field]));
+      let rowCount = 0;
+      for (const { row, sourceIndex } of table.dataRows) {
+        const standard = {};
+        const extra_fields = {};
+        table.headers.forEach((header, index) => {
+          const value = row[index];
+          if (value === "" || value == null) return;
+          const target = targetBySource[header];
+          if (target) standard[target] = value;
+          else extra_fields[header] = value;
+        });
+        if (!["description", "test_steps", "expected_result"].some((field) => String(standard[field] || "").trim())) continue;
+        const rawId = String(standard.case_id || "").trim();
+        cases.push({
+          id: null,
+          case_id: rawId || `IMP-${String(generated++).padStart(4, "0")}`,
+          case_type: /api|接口/i.test(standard.case_type || "") ? "API" : /mobile|app|移动/i.test(standard.case_type || "") ? "Mobile" : "Web",
+          description: String(standard.description || "").trim(), preconditions: String(standard.preconditions || "").trim(),
+          test_steps: String(standard.test_steps || "").trim(), test_data: String(standard.test_data || "").trim(),
+          expected_result: String(standard.expected_result || "").trim(), priority: /high|critical|最高/i.test(standard.priority || "") ? "P0" : /low|低/i.test(standard.priority || "") ? "P2" : String(standard.priority || "P1").toUpperCase().match(/^P[0-2]$/)?.[0] || "P1",
+          extra_fields, source_file: filename, source_sheet: sheetName, source_row: sourceIndex + 1,
+          import_order: cases.length + 1, field_provenance: {}, mapping_confidence: 1,
+          warnings: rawId ? [] : ["Case ID was generated"],
+        });
+        rowCount += 1;
+      }
+      sheets.push({
+        name: sheetName,
+        status: rowCount ? "imported" : "no-data",
+        reason: rowCount ? "" : table.reason || "Header row found but no test cases were produced",
+        header_row: table.headerIndex + 1,
+        row_count: rowCount,
+        mappings,
+        table_index: tableOffset + 1,
       });
-      rowCount += 1;
     });
-    sheets.push({ name: sheetName, status: "imported", reason: "", header_row: headerIndex + 1, row_count: rowCount, mappings });
   }
   return { cases, sheets };
 }
@@ -204,7 +284,8 @@ async function handleApi(request, env, url) {
     if (!/\.(xlsx|xlsm|xls|csv)$/i.test(file.name)) return json({ detail: "Supported files are .xlsx, .xls, .xlsm and .csv" }, 400);
     const import_id = crypto.randomUUID();
     const parsed = parseWorkbook(file.name, new Uint8Array(await file.arrayBuffer()));
-    const session = { import_id, filename: file.name, ...parsed, warnings: parsed.cases.length ? [] : ["No test cases were detected. Check the header row and field names."], explanation: [`Read ${parsed.sheets.length} sheet(s).`, "Matched known aliases and preserved unmatched columns.", "Recorded the source sheet and row for every imported case."], status: "preview", history: [] };
+    const tableCount = parsed.sheets.filter((sheet) => sheet.status === "imported" || sheet.status === "no-data").length;
+    const session = { import_id, filename: file.name, ...parsed, warnings: parsed.cases.length ? [] : ["No test cases were detected. Check the header row and field names."], explanation: [`Scanned ${parsed.sheets.length} sheet(s) for table-like regions and recognized ${tableCount} table(s).`, "Matched known aliases and preserved unmatched columns.", "Recorded the source sheet and row for every imported case."], status: "preview", history: [] };
     await saveSession(env.DB, session);
     return json(session);
   }

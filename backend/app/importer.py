@@ -4,6 +4,7 @@ import csv
 import io
 import re
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +12,25 @@ from langgraph.graph import END, START, StateGraph
 from openpyxl import load_workbook
 from typing_extensions import TypedDict
 
-from .models import ColumnMapping, ColumnMappingDecision, ImportPreview, ImportedCase, SheetReport, STANDARD_FIELDS
+from .models import (
+    ColumnMapping,
+    ColumnMappingDecision,
+    ImportPreview,
+    ImportedCase,
+    SheetReport,
+    TableLocationDecision,
+    STANDARD_FIELDS,
+)
 from .llm import create_deepseek_model, deepseek_enabled
+
+
+REGION_HEADER_WINDOW = 25  # header candidates are scored within the first rows of a region
+HEADER_MIN_SCORE = 1.0  # a header row must score at least this much
+DATA_OVERLAP_MIN = 0.5  # a following row must fill this fraction of the header columns to count as data
+LLM_TABLE_MAX = 3  # at most this many tables per sheet are accepted from the model
+LLM_PREVIEW_ROWS = 60  # rows sent to the model for table location
+LLM_TABLE_CONFIDENCE_CAP = 0.7  # mappings on model-located tables are never trusted above this
+LLM_TABLE_HEADER_PROXIMITY = 3  # a model table within this many rows of a rule table is a duplicate
 
 
 ALIASES = {
@@ -128,11 +146,52 @@ def header_score(row: list[Any]) -> float:
     return known * 4 + min(len(values), 8) * .25
 
 
-def analyze_sheet(name: str, rows: list[list[Any]]) -> tuple[int | None, list[str], list[dict[str, Any]]]:
-    candidates = [(index, header_score(row)) for index, row in enumerate(rows[:25])]
-    if not candidates or max(score for _, score in candidates) < 1:
-        return None, [], []
-    header_index = max(candidates, key=lambda item: item[1])[0]
+def is_active_row(row: list[Any]) -> bool:
+    """A row that is dense enough to belong to a table (>= 2 non-empty cells)."""
+    return sum(1 for value in row if str(value or "").strip()) >= 2
+
+
+def table_regions(rows: list[list[Any]]) -> list[tuple[int, int]]:
+    """Split a sheet into table-like regions.
+
+    Rows with >= 2 non-empty cells are members; a single sparse row between two
+    members is bridged, while 2+ consecutive sparse rows split regions. This keeps
+    one table with an occasional blank row intact while separating independent
+    tables that may sit anywhere in the sheet (title blocks, notes, etc.).
+    """
+    member = [is_active_row(row) for row in rows]
+    for index in range(len(member)):
+        if not member[index] and index > 0 and index + 1 < len(member) and member[index - 1] and member[index + 1]:
+            member[index] = True
+    regions: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, active in enumerate(member + [False]):
+        if active and start is None:
+            start = index
+        elif not active and start is not None:
+            regions.append((start, index - 1))
+            start = None
+    return regions
+
+
+@dataclass
+class TableResult:
+    """One detected table inside a sheet, using absolute row indices."""
+
+    header_index: int
+    headers: list[str]
+    data_rows: list[dict[str, Any]]  # records keyed by header, each carrying __source_row__
+    located_by: str = "rules"  # "rules" | "llm"
+    reason: str = ""
+
+
+def analyze_region(rows: list[list[Any]], start: int, end: int) -> TableResult | None:
+    """Detect a single table inside rows[start..end] (absolute indices)."""
+    window = min(end + 1, start + REGION_HEADER_WINDOW)
+    candidates = [(index, header_score(rows[index])) for index in range(start, window)]
+    header_index, score = max(candidates, key=lambda item: item[1])
+    if score < HEADER_MIN_SCORE:
+        return None
     raw_headers = rows[header_index]
     headers: list[str] = []
     seen: dict[str, int] = {}
@@ -140,14 +199,97 @@ def analyze_sheet(name: str, rows: list[list[Any]]) -> tuple[int | None, list[st
         header = str(value or f"Column {index + 1}").strip()
         seen[header] = seen.get(header, 0) + 1
         headers.append(f"{header} ({seen[header]})" if seen[header] > 1 else header)
-    data_rows = []
-    for source_index, row in enumerate(rows[header_index + 1 :], start=header_index + 2):
+    header_columns = [index for index, value in enumerate(raw_headers) if str(value or "").strip()]
+    data_rows: list[dict[str, Any]] = []
+    aligned = False
+    for source_index in range(header_index + 1, end + 1):
+        row = rows[source_index]
+        if not is_active_row(row):
+            continue
+        if not aligned:
+            filled = sum(1 for column in header_columns if column < len(row) and str(row[column] or "").strip())
+            if header_columns and filled / len(header_columns) < DATA_OVERLAP_MIN:
+                continue  # first dense row below the header does not line up; keep scanning
+            aligned = True
         values = list(row) + [None] * max(0, len(headers) - len(row))
         record = {headers[index]: values[index] for index in range(len(headers)) if values[index] not in (None, "")}
         if record:
-            record["__source_row__"] = source_index
+            record["__source_row__"] = source_index + 1  # 1-based, matches the Excel row shown to users
             data_rows.append(record)
-    return header_index + 1, headers, data_rows
+    if not aligned:
+        has_following = any(is_active_row(row) for row in rows[header_index + 1 : end + 1])
+        reason = "Header row found but rows below it do not align with the columns" if has_following else "Header row found but no data rows below it"
+        return TableResult(header_index=header_index, headers=headers, data_rows=data_rows, reason=reason)
+    return TableResult(header_index=header_index, headers=headers, data_rows=data_rows)
+
+
+def detect_tables(rows: list[list[Any]]) -> list[TableResult]:
+    """Find every rule-detected table in a sheet (rules only, no LLM)."""
+    tables: list[TableResult] = []
+    for start, end in table_regions(rows):
+        table = analyze_region(rows, start, end)
+        if table is not None:
+            tables.append(table)
+    return tables
+
+
+def sheet_has_content(rows: list[list[Any]]) -> bool:
+    return any(is_active_row(row) for row in rows)
+
+
+def _build_preview_payload(name: str, rows: list[list[Any]]) -> dict[str, Any]:
+    preview: list[dict[str, Any]] = []
+    for index, row in enumerate(rows[:LLM_PREVIEW_ROWS], start=1):
+        cells = [[column + 1, str(value)[:40]] for column, value in enumerate(row) if str(value or "").strip()]
+        if len(cells) >= 2:
+            preview.append({"row": index, "cells": cells})
+    return {"sheet": name, "rows": preview}
+
+
+def locate_tables_with_llm(name: str, rows: list[list[Any]]) -> list[TableResult]:
+    """Ask the model to locate test-case tables when rule detection found none.
+
+    Only a compact preview of the first rows (non-empty cells with coordinates)
+    is sent. Located blocks are re-validated by the standard region analysis, so a
+    hallucinated table without real aligned data rows is dropped.
+    """
+    if not deepseek_enabled():
+        return []
+    try:
+        from langchain.agents import create_agent
+
+        agent = create_agent(
+            model=create_deepseek_model(),
+            tools=[],
+            response_format=TableLocationDecision,
+            system_prompt=(
+                "You locate test-case tables inside spreadsheet sheets. A test-case table is a rectangular block "
+                "with a header row whose columns describe test cases (id, description, steps, expected result, "
+                "priority, ...) and data rows directly beneath it. Ignore titles, instructions, and unrelated "
+                "content. Return each table with 1-based row numbers relative to the whole sheet and the exact "
+                "header labels as listed. Use an empty tables array when there is none. Never invent row numbers "
+                "outside the provided rows."
+            ),
+        )
+        result = agent.invoke({"messages": [{"role": "user", "content": f"Workbook sheet preview:\n{_build_preview_payload(name, rows)}"}]})
+        decision = result["structured_response"]
+    except Exception:
+        return []
+    tables: list[TableResult] = []
+    for located in decision.tables[:LLM_TABLE_MAX]:
+        header_index = located.header_row - 1
+        first_data = located.first_data_row - 1
+        last_data = located.last_data_row - 1
+        if not (0 <= header_index < len(rows) and first_data > header_index and last_data >= first_data and last_data < len(rows)):
+            continue
+        region = analyze_region(rows, header_index, last_data)
+        if region is None or not region.data_rows:
+            continue
+        region.header_index = header_index
+        region.located_by = "llm"
+        region.reason = f"Table located by the model at row {located.header_row}; verify the header row"
+        tables.append(region)
+    return tables
 
 
 def normalize_type(value: Any) -> str:
@@ -181,66 +323,100 @@ def map_node(state: ImportState) -> dict[str, Any]:
     all_cases: list[ImportedCase] = []
     reports: list[SheetReport] = []
     warnings: list[str] = []
+    llm_assisted: list[str] = []
     next_generated = 1
     for sheet_name, rows in state["sheets"]:
-        header_row, headers, data_rows = analyze_sheet(sheet_name, rows)
-        if header_row is None or not data_rows:
+        tables = detect_tables(rows)
+        # Rules found no table with data: let the model locate irregular tables
+        # that the heuristics could not see (mid-sheet blocks, odd layouts).
+        if not any(table.data_rows for table in tables) and sheet_has_content(rows) and deepseek_enabled():
+            located = locate_tables_with_llm(sheet_name, rows)
+            tables = tables + [
+                table
+                for table in located
+                if all(abs(table.header_index - existing.header_index) > LLM_TABLE_HEADER_PROXIMITY for existing in tables)
+            ]
+        if not tables:
             reports.append(SheetReport(name=sheet_name, status="skipped", reason="No tabular test case data detected"))
             continue
-        mappings = semantic_mapping(headers, data_rows, rule_mapping(headers))
-        target_by_source = {item.source_column: item.target_field for item in mappings}
-        confidence_by_source = {item.source_column: item.confidence for item in mappings}
-        sheet_count = 0
-        for record in data_rows:
-            standard: dict[str, Any] = {}
-            extras: dict[str, Any] = {}
-            provenance: dict[str, str] = {}
-            confidences: list[float] = []
-            for source, value in record.items():
-                if source == "__source_row__":
+        for table_index, table in enumerate(tables, start=1):
+            mappings = semantic_mapping(table.headers, table.data_rows, rule_mapping(table.headers))
+            if table.located_by == "llm":
+                mappings = [item.model_copy(update={"confidence": min(item.confidence, LLM_TABLE_CONFIDENCE_CAP)}) for item in mappings]
+            target_by_source = {item.source_column: item.target_field for item in mappings}
+            confidence_by_source = {item.source_column: item.confidence for item in mappings}
+            sheet_count = 0
+            for record in table.data_rows:
+                standard: dict[str, Any] = {}
+                extras: dict[str, Any] = {}
+                provenance: dict[str, str] = {}
+                confidences: list[float] = []
+                for source, value in record.items():
+                    if source == "__source_row__":
+                        continue
+                    target = target_by_source.get(source)
+                    if target:
+                        standard[target] = value
+                        provenance[target] = f"{sheet_name}!{source} row {record['__source_row__']}"
+                        confidences.append(confidence_by_source[source])
+                    else:
+                        extras[source] = value
+                if not any(str(standard.get(field, "")).strip() for field in ("description", "test_steps", "expected_result")):
                     continue
-                target = target_by_source.get(source)
-                if target:
-                    standard[target] = value
-                    provenance[target] = f"{sheet_name}!{source} row {record['__source_row__']}"
-                    confidences.append(confidence_by_source[source])
-                else:
-                    extras[source] = value
-            if not any(str(standard.get(field, "")).strip() for field in ("description", "test_steps", "expected_result")):
-                continue
-            raw_id = str(standard.get("case_id") or "").strip()
-            case_id = raw_id or f"IMP-{next_generated:04d}"
-            case_warnings = []
-            if not raw_id:
-                case_warnings.append("Case ID was generated")
-                next_generated += 1
-            if not standard.get("description"):
-                case_warnings.append("Description is missing")
-            imported = ImportedCase(
-                case_id=case_id,
-                case_type=normalize_type(standard.get("case_type")),
-                description=str(standard.get("description") or "").strip(),
-                preconditions=str(standard.get("preconditions") or "").strip(),
-                test_steps=str(standard.get("test_steps") or "").strip(),
-                test_data=str(standard.get("test_data") or "").strip(),
-                expected_result=str(standard.get("expected_result") or "").strip(),
-                priority=normalize_priority(standard.get("priority")),
-                extra_fields=extras,
-                source_file=state["filename"],
-                source_sheet=sheet_name,
-                source_row=record["__source_row__"],
-                import_order=len(all_cases) + 1,
-                field_provenance=provenance,
-                mapping_confidence=sum(confidences) / len(confidences) if confidences else .5,
-                warnings=case_warnings,
+                raw_id = str(standard.get("case_id") or "").strip()
+                case_id = raw_id or f"IMP-{next_generated:04d}"
+                case_warnings = []
+                if not raw_id:
+                    case_warnings.append("Case ID was generated")
+                    next_generated += 1
+                if not standard.get("description"):
+                    case_warnings.append("Description is missing")
+                imported = ImportedCase(
+                    case_id=case_id,
+                    case_type=normalize_type(standard.get("case_type")),
+                    description=str(standard.get("description") or "").strip(),
+                    preconditions=str(standard.get("preconditions") or "").strip(),
+                    test_steps=str(standard.get("test_steps") or "").strip(),
+                    test_data=str(standard.get("test_data") or "").strip(),
+                    expected_result=str(standard.get("expected_result") or "").strip(),
+                    priority=normalize_priority(standard.get("priority")),
+                    extra_fields=extras,
+                    source_file=state["filename"],
+                    source_sheet=sheet_name,
+                    source_row=record["__source_row__"],
+                    import_order=len(all_cases) + 1,
+                    field_provenance=provenance,
+                    mapping_confidence=sum(confidences) / len(confidences) if confidences else .5,
+                    warnings=case_warnings,
+                )
+                all_cases.append(imported)
+                sheet_count += 1
+            if sheet_count:
+                status = "imported"
+                reason = ""
+            else:
+                status = "no-data"
+                reason = table.reason or "Header row found but no test cases were produced"
+            if table.located_by == "llm" and sheet_count:
+                llm_assisted.append(sheet_name)
+            reports.append(
+                SheetReport(
+                    name=sheet_name,
+                    status=status,
+                    reason=reason,
+                    header_row=table.header_index + 1,
+                    row_count=sheet_count,
+                    mappings=mappings,
+                    table_index=table_index,
+                )
             )
-            all_cases.append(imported)
-            sheet_count += 1
-        reports.append(SheetReport(name=sheet_name, status="imported", header_row=header_row, row_count=sheet_count, mappings=mappings))
     if not all_cases:
         warnings.append("No test cases were detected. Check the header row and field names.")
+    for name in dict.fromkeys(llm_assisted):
+        warnings.append(f"{name}: a table was located with AI assistance — verify the header row and field mapping.")
+    table_count = sum(1 for report in reports if report.status in {"imported", "no-data"})
     explanation = [
-        f"Read {len(state['sheets'])} sheet(s); {sum(report.status == 'imported' for report in reports)} contained test case data.",
+        f"Scanned {len(state['sheets'])} sheet(s) for table-like regions and recognized {table_count} table(s).",
         "Matched known aliases first, then used the LangChain semantic mapper for ambiguous columns when a model key was available.",
         "Preserved every unmatched column in extra_fields and recorded the source sheet and row for each case.",
     ]

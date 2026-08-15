@@ -1,0 +1,40 @@
+{
+  "name": "qa-orbit-local-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "QA Orbit local browser execution agent for macOS and Windows",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "dev": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.qaorbit.localagent",
+    "productName": "QA Orbit Agent",
+    "files": [
+      "electron/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": ["**/*", "!**/__pycache__/**"]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg", "zip"]
+    },
+    "win": {
+      "target": ["nsis", "zip"]
+    }
+  }
+}

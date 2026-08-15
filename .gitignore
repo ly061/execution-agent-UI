@@ -1,4 +1,7 @@
 node_modules/
+local-agent/node_modules/
+local-agent/.venv/
+local-agent/release/
 .venv/
 .venv-python39-incompatible/
 backend/data/

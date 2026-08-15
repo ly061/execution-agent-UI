@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import json
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import database
+from . import database, generation_agent
 from .agent import chat
 from .importer import build_preview
 from .llm import DEEPSEEK_MODEL, deepseek_enabled
-from .models import CaseAssistRequest, CaseAssistResponse, ChatRequest, ChatResponse, ConfirmResponse, ImportPreview
+from .models import CaseAssistRequest, CaseAssistResponse, ChatRequest, ChatResponse, ConfirmResponse, GenerationChatRequest, GenerationResponse, GenerationTurnResponse, ImportPreview
 from .case_assistant import assist_case
+from .generator import extract_document_text, generate_cases
 
 
 @asynccontextmanager
@@ -28,6 +32,19 @@ app.add_middleware(
     allow_methods=["*"] ,
     allow_headers=["*"],
 )
+
+
+def _sse(events):
+    """Wrap an async iterator of ("event", data) tuples into a text/event-stream response."""
+
+    async def generator():
+        try:
+            async for event, data in events:
+                yield f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+        except (ValueError, RuntimeError) as error:
+            yield f"event: error\ndata: {json.dumps({'detail': str(error)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(generator(), media_type="text/event-stream")
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
@@ -60,6 +77,100 @@ async def case_assistant(request: CaseAssistRequest, x_deepseek_api_key: str | N
     except RuntimeError as error:
         status = 503 if "not configured" in str(error) else 502
         raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+@app.post("/api/generation/cases", response_model=GenerationResponse)
+async def generate_test_cases(file: UploadFile = File(...), x_deepseek_api_key: str | None = Header(default=None)) -> GenerationResponse:
+    try:
+        return await generate_cases(file.filename or "requirements.txt", await file.read(), x_deepseek_api_key)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        status = 503 if "API key" in str(error) else 502
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+@app.post("/api/generation/sessions", response_model=GenerationTurnResponse)
+async def create_generation_session(
+    text: str | None = Form(default=None),
+    file: UploadFile | None = File(default=None),
+    x_deepseek_api_key: str | None = Header(default=None),
+) -> GenerationTurnResponse:
+    """Start an interactive generation session from pasted text or an uploaded document."""
+    try:
+        if file is not None and file.filename:
+            source = file.filename
+            requirements = extract_document_text(source, await file.read())
+        else:
+            source = "Pasted requirements"
+            requirements = text or ""
+        return await generation_agent.start_session(uuid.uuid4().hex, source, requirements, x_deepseek_api_key)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        status = 503 if "API key" in str(error) else 502
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+@app.post("/api/generation/sessions/stream")
+async def create_generation_session_stream(
+    text: str | None = Form(default=None),
+    file: UploadFile | None = File(default=None),
+    x_deepseek_api_key: str | None = Header(default=None),
+):
+    """Same as the session start, but streams the AI thinking process as it works."""
+    try:
+        if file is not None and file.filename:
+            source = file.filename
+            requirements = extract_document_text(source, await file.read())
+        else:
+            source = "Pasted requirements"
+            requirements = text or ""
+        generation_agent._require_api_key(x_deepseek_api_key)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    session_id = uuid.uuid4().hex
+    return _sse(generation_agent.stream_create_events(session_id, source, requirements, x_deepseek_api_key))
+
+
+@app.post("/api/generation/sessions/{session_id}/chat", response_model=GenerationTurnResponse)
+async def generation_chat(session_id: str, request: GenerationChatRequest, x_deepseek_api_key: str | None = Header(default=None)) -> GenerationTurnResponse:
+    try:
+        return await generation_agent.continue_session(session_id, request, x_deepseek_api_key)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        status = 503 if "API key" in str(error) else 502
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+@app.post("/api/generation/sessions/{session_id}/chat/stream")
+async def generation_chat_stream(session_id: str, request: GenerationChatRequest, x_deepseek_api_key: str | None = Header(default=None)):
+    """Same as the chat endpoint, but streams the AI thinking process as it works."""
+    row = database.get_generation_session(session_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Generation session not found")
+    if row["status"] in ("generated", "working") and not request.cases:
+        return JSONResponse(generation_agent.session_state(session_id).model_dump(mode="json"))
+    try:
+        generation_agent._require_api_key(x_deepseek_api_key)
+        if not request.cases and not request.message.strip() and not request.answers:
+            raise ValueError("Answer the questions or type a message first.")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return _sse(generation_agent.stream_turn_events(session_id, request, x_deepseek_api_key))
+
+
+@app.get("/api/generation/sessions/{session_id}", response_model=GenerationTurnResponse)
+def get_generation_session(session_id: str) -> GenerationTurnResponse:
+    state = generation_agent.session_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Generation session not found")
+    return state
 
 
 @app.post("/api/imports/preview", response_model=ImportPreview)
