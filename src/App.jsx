@@ -7,8 +7,10 @@ import {
   Archive,
   ArrowLeft,
   ArrowClockwise,
+  ArrowDown,
   ArrowsIn,
   ArrowsOut,
+  ArrowRight,
   Bell,
   CaretDown,
   CaretRight,
@@ -22,10 +24,12 @@ import {
   DotsThree,
   DownloadSimple,
   FileText,
+  FlowArrow,
   Funnel,
   Gauge,
   GearSix,
   GlobeHemisphereWest,
+  GitBranch,
   House,
   Info,
   Key,
@@ -1588,7 +1592,21 @@ function buildLocalCases(text, answers, sourceLabel) {
     message: `Generated ${cases.length} case draft${cases.length === 1 ? "" : "s"} for your review.`,
     summary: `Found ${requirements.length} testable requirement${requirements.length === 1 ? "" : "s"} for ${sourceLabel}. Review and edit the table before adding anything to your inventory.`,
     cases,
+    flowchart: buildLocalFlowchart(text),
   };
+}
+
+function buildLocalFlowchart(text) {
+  const clauses = String(text).split(/\n+|(?<=[.!?。！？])\s+/).map((item) => item.replace(/^[-*#\d.()、\s]+/, "").trim()).filter((item) => item.length >= 12);
+  const branching = /\b(if|when|unless|otherwise|either|role|status|state|approve|reject)\b|如果|当|否则|角色|状态|审批|拒绝/i.test(text);
+  if (clauses.length < 3 && String(text).length < 360 && !branching) return null;
+  const primary = clauses.slice(0, 3).map((item) => item.length > 66 ? `${item.slice(0, 63)}…` : item);
+  const nodes = [
+    { id: "start", label: "User starts the workflow", kind: "start", next: ["step-1"] },
+    ...primary.map((label, index) => ({ id: `step-${index + 1}`, label, kind: branching && index === 1 ? "decision" : "step", next: index < primary.length - 1 ? [`step-${index + 2}`] : ["end"] })),
+    { id: "end", label: "Outcome is confirmed", kind: "end", next: [] },
+  ];
+  return { title: "How I understand this requirement", nodes };
 }
 
 function startLocalGeneration(text, sourceLabel) {
@@ -1606,6 +1624,7 @@ function startLocalGeneration(text, sourceLabel) {
       status: "asking",
       message: `I found ${text.split(/\n+/).filter((line) => line.trim().length >= 18).length} testable requirement line(s) in ${sourceLabel}. Before I build the suite, a couple of details would make the coverage accurate.`,
       questions,
+      flowchart: buildLocalFlowchart(text),
     };
   }
   return buildLocalCases(text, {}, sourceLabel);
@@ -1613,6 +1632,26 @@ function startLocalGeneration(text, sourceLabel) {
 
 function continueLocalGeneration(text, answers, message, sourceLabel) {
   return buildLocalCases(text, { ...answers, platform: message, priority: message }, sourceLabel);
+}
+
+function RequirementFlow({ flowchart }) {
+  if (!flowchart?.nodes?.length) return null;
+  const byId = new Map(flowchart.nodes.map((node) => [node.id, node]));
+  const kindLabel = { start: "Start", step: "Step", decision: "Decision", end: "Outcome" };
+  const nodeIcon = (kind) => kind === "decision" ? <GitBranch size={14} weight="bold" /> : kind === "start" ? <Play size={14} weight="fill" /> : kind === "end" ? <CheckCircle size={14} weight="fill" /> : <FlowArrow size={14} weight="bold" />;
+  return <section className="gen-requirement-flow" aria-label={flowchart.title || "Requirement flow"}>
+    <header><span><FlowArrow size={18} weight="duotone" /></span><div><strong>{flowchart.title || "Requirement flow"}</strong><small>Generated because this requirement has multiple steps or branches</small></div></header>
+    <div className="gen-flow-track">
+      {flowchart.nodes.map((node, index) => <div className="gen-flow-item" key={node.id}>
+        <article className={`gen-flow-node ${node.kind || "step"}`}>
+          <div className="gen-flow-node-label"><span>{nodeIcon(node.kind)}</span><small>{kindLabel[node.kind] || "Step"}</small></div>
+          <p>{node.label}</p>
+          {!!node.next?.length && <div className="gen-flow-next">{node.next.map((nextId) => <span key={nextId}><ArrowRight size={11} />{byId.get(nextId)?.label || nextId}</span>)}</div>}
+        </article>
+        {index < flowchart.nodes.length - 1 && node.next?.includes(flowchart.nodes[index + 1].id) && <span className="gen-flow-connector" aria-hidden="true"><ArrowRight size={18} /><ArrowDown size={18} /></span>}
+      </div>)}
+    </div>
+  </section>;
 }
 
 const chineseToInt = (raw) => {
@@ -1754,6 +1793,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [liveThinking, setLiveThinking] = useState("");
   const [reviewOpen, setReviewOpen] = useState(false);
   const [learnedProfile, setLearnedProfile] = useState(null);
@@ -1794,6 +1834,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
     setBusy(false);
     setError("");
     setLiveThinking("");
+    setAttachmentMenuOpen(false);
     setReviewOpen(false);
     submittingRef.current = false;
     clarifyRoundsRef.current = 0;
@@ -1810,7 +1851,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
         .map((question) => question.question)
         .filter((question) => question && !String(response.message || "").includes(question));
       const content = [response.message, missingQuestions.join("\n")].filter(Boolean).join("\n\n");
-      setMessages((current) => [...current, { role: "agent", content, reasoning }]);
+      setMessages((current) => [...current, { role: "agent", content, reasoning, flowchart: response.flowchart }]);
       setQuestions(nextQuestions);
       setComposer("");
       submittingRef.current = false;
@@ -1823,7 +1864,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
     const previousLen = draft?.cases?.length || 0;
     setQuestions([]);
     setComposer("");
-    setMessages((current) => [...current, { role: "agent", content: response.message, reasoning }]);
+    setMessages((current) => [...current, { role: "agent", content: response.message, reasoning, flowchart: response.flowchart }]);
     if (action === "reply") {
       setStage("results");
       return;
@@ -2099,7 +2140,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
       <aside className="gen-chat-side">
         <div className="gen-chat-side-heading"><span><Robot size={18} weight="duotone" /></span><div><strong>Continue with the agent</strong><small>Explain, edit, add or remove cases</small></div></div>
         <div className="chat-messages gen-side-messages">
-          {messages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div>{item.role === "agent" && item.reasoning ? <details className="gen-thinking"><summary>AI thinking process</summary><pre>{item.reasoning}</pre></details> : null}<p>{item.content}</p></div></div>)}
+          {messages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div>{item.role === "agent" && item.reasoning ? <details className="gen-thinking"><summary>AI thinking process</summary><pre>{item.reasoning}</pre></details> : null}<p>{item.content}</p>{item.role === "agent" && <RequirementFlow flowchart={item.flowchart} />}</div></div>)}
           {busy && <div className="chat-message agent"><span><Robot size={16} /></span><div>{liveThinking ? <details className="gen-thinking live" open><summary>AI is thinking…</summary><pre>{liveThinking}</pre></details> : <p>The agent is working…</p>}</div></div>}
         </div>
         {error && <div className="gen-chat-error"><Warning size={15} /><span>{error}</span></div>}
@@ -2144,16 +2185,21 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
           />
           <div className="generator-chat-toolbar">
             <div className="generator-chat-tools">
-              <button type="button" disabled={busy} onClick={() => inputRef.current?.click()} title="Attach a requirement document"><UploadSimple size={17} /><span>Attach</span></button>
-              <button type="button" disabled={busy} onClick={() => learnInputRef.current?.click()} title="Learn from approved historical cases"><Database size={17} /><span>Learn cases</span></button>
+              <div className="generator-attachment-menu">
+                <button type="button" disabled={busy} aria-haspopup="menu" aria-expanded={attachmentMenuOpen} onClick={() => setAttachmentMenuOpen((open) => !open)} title="Add a file"><UploadSimple size={17} /><span>Attach</span><CaretDown size={13} /></button>
+                {attachmentMenuOpen && <div className="generator-attachment-popover" role="menu" aria-label="Attachment options">
+                  <button type="button" role="menuitem" onClick={() => { setAttachmentMenuOpen(false); inputRef.current?.click(); }}><span><FileText size={18} weight="duotone" /></span><div><strong>Upload requirement</strong><small>PDF, DOCX, Markdown or TXT</small></div></button>
+                  <button type="button" role="menuitem" onClick={() => { setAttachmentMenuOpen(false); learnInputRef.current?.click(); }}><span><Database size={18} weight="duotone" /></span><div><strong>Learn cases</strong><small>Learn style from approved XLSX, XLS or CSV</small></div></button>
+                </div>}
+              </div>
             </div>
             <div className="generator-chat-send">
               {text && <span>{text.length.toLocaleString()}</span>}
               <button type="button" aria-label="Send requirements" disabled={busy || !text.trim()} onClick={startFromText}><PaperPlaneTilt size={18} weight="fill" /></button>
             </div>
           </div>
-          <input ref={inputRef} type="file" accept=".pdf,.docx,.md,.txt" hidden onChange={(event) => upload(event.target.files?.[0])} />
-          <input ref={learnInputRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={(event) => learnFromCases(event.target.files?.[0])} />
+          <input ref={inputRef} type="file" accept=".pdf,.docx,.md,.txt" hidden onChange={(event) => { setAttachmentMenuOpen(false); upload(event.target.files?.[0]); }} />
+          <input ref={learnInputRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={(event) => { setAttachmentMenuOpen(false); learnFromCases(event.target.files?.[0]); }} />
         </div>
         <div className="generator-chat-prompts" aria-label="Example prompts">
           <button onClick={() => setText("Generate login test cases covering valid credentials, invalid passwords, account lockout, and session expiry.")}>Test a login flow</button>
@@ -2181,7 +2227,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
         </div>
         <div className="gen-chat-body">
           <div className="chat-messages">
-            {messages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div>{item.role === "agent" && item.reasoning ? <details className="gen-thinking"><summary>AI thinking process</summary><pre>{item.reasoning}</pre></details> : null}<p>{item.content}</p></div></div>)}
+            {messages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div>{item.role === "agent" && item.reasoning ? <details className="gen-thinking"><summary>AI thinking process</summary><pre>{item.reasoning}</pre></details> : null}<p>{item.content}</p>{item.role === "agent" && <RequirementFlow flowchart={item.flowchart} />}</div></div>)}
             {busy && <div className="chat-message agent"><span><Robot size={16} /></span><div>{liveThinking ? <details className="gen-thinking live" open><summary>AI is thinking…</summary><pre>{liveThinking}</pre></details> : <p>The agent is working…</p>}</div></div>}
           </div>
           {error && <div className="gen-chat-error"><Warning size={15} /><span>{error}</span></div>}

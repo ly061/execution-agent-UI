@@ -169,6 +169,28 @@ def test_parse_decision_falls_back_to_generate_when_questions_empty():
         generation_agent._parse_decision({"action": "ask", "message": "hm", "questions": [{"id": "q1", "question": ""}]})
 
 
+def test_parse_decision_keeps_a_valid_complex_requirement_flowchart():
+    decision = generation_agent._parse_decision(
+        {
+            **GENERATE_DECISION,
+            "flowchart": {
+                "title": "Claim approval flow",
+                "nodes": [
+                    {"id": "start", "label": "Submit claim", "kind": "start", "next": ["review"]},
+                    {"id": "review", "label": "Review eligibility", "kind": "decision", "next": ["approved", "missing"]},
+                    {"id": "approved", "label": "Schedule payment", "kind": "end", "next": []},
+                    {"id": "missing", "label": "Request documents", "kind": "step", "next": ["review", "unknown"]},
+                ],
+            },
+        }
+    )
+
+    assert decision.flowchart is not None
+    assert decision.flowchart.title == "Claim approval flow"
+    assert decision.flowchart.nodes[1].kind == "decision"
+    assert decision.flowchart.nodes[-1].next == ["review"]  # unknown node references are removed
+
+
 def _generated_session(monkeypatch) -> str:
     """Create a session and answer its questions until the suite is generated."""
 

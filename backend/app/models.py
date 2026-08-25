@@ -170,6 +170,18 @@ class GenerationQuestion(BaseModel):
     options: list[str] = Field(default_factory=list)
 
 
+class GenerationFlowNode(BaseModel):
+    id: str
+    label: str
+    kind: Literal["start", "step", "decision", "end"] = "step"
+    next: list[str] = Field(default_factory=list)
+
+
+class GenerationFlowchart(BaseModel):
+    title: str
+    nodes: list[GenerationFlowNode] = Field(default_factory=list)
+
+
 class GenerationDecision(BaseModel):
     """One model turn in the interactive generation flow."""
 
@@ -180,6 +192,7 @@ class GenerationDecision(BaseModel):
     cases: list[GeneratedCase] = Field(default_factory=list)
     operations: list[CasePatchOperation] = Field(default_factory=list)
     suggestions: list[AgentSuggestion] = Field(default_factory=list)
+    flowchart: GenerationFlowchart | None = None
 
 
 class GenerationTurnResponse(BaseModel):
@@ -192,6 +205,7 @@ class GenerationTurnResponse(BaseModel):
     cases: list[GeneratedCase] = Field(default_factory=list)
     operations: list[CasePatchOperation] = Field(default_factory=list)
     suggestions: list[AgentSuggestion] = Field(default_factory=list)
+    flowchart: GenerationFlowchart | None = None
 
 
 class GenerationAnswer(BaseModel):

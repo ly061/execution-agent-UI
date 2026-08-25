@@ -748,6 +748,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .generator-chat-tools button { min-height: 36px; padding: 0 11px; display: inline-flex; align-items: center; gap: 7px; border: 0; border-radius: 10px; color: #667085; background: transparent; font-size: 10.5px; font-weight: 650; cursor: pointer; transition: .15s ease; }
 .generator-chat-tools button:hover:not(:disabled) { color: var(--pink); background: var(--pink-soft); }
 .generator-chat-tools button:disabled { cursor: wait; opacity: .45; }
+.generator-attachment-menu { position: relative; }
+.generator-attachment-menu > button[aria-expanded="true"] { color: var(--pink); background: var(--pink-soft); }
+.generator-attachment-popover { position: absolute; left: 0; bottom: calc(100% + 9px); z-index: 12; width: 268px; padding: 6px; border: 1px solid #e2e6ec; border-radius: 14px; background: #fff; box-shadow: 0 16px 38px rgba(26,36,58,.16); }
+.generator-attachment-popover > button { width: 100%; min-height: 58px; padding: 8px 9px; display: grid; grid-template-columns: 36px minmax(0,1fr); gap: 9px; align-items: center; border-radius: 10px; text-align: left; }
+.generator-attachment-popover > button + button { margin-top: 3px; }
+.generator-attachment-popover > button > span { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 9px; color: var(--pink); background: var(--pink-soft); }
+.generator-attachment-popover > button > div { min-width: 0; }
+.generator-attachment-popover strong, .generator-attachment-popover small { display: block; }
+.generator-attachment-popover strong { color: #344054; font-size: 10.5px; }
+.generator-attachment-popover small { margin-top: 3px; color: #98a2b3; font-size: 9px; font-weight: 500; line-height: 1.35; }
+.generator-attachment-popover > button:hover strong { color: var(--pink); }
 .generator-chat-send { display: flex; align-items: center; gap: 9px; }
 .generator-chat-send > span { color: #98a2b3; font-size: 9.5px; }
 .generator-chat-send button { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 11px; color: #fff; background: var(--pink); box-shadow: 0 5px 14px rgba(211,17,69,.24); cursor: pointer; transition: .15s ease; }
@@ -811,6 +822,29 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .gen-thinking.live > summary { color: #4265ba; }
 .gen-thinking.live > summary::after { content: ""; flex: 0 0 6px; width: 6px; height: 6px; border-radius: 99px; background: #4265ba; border: 0; animation: gen-pulse 1s ease-in-out infinite; }
 .gen-thinking.live > pre { color: #4265ba; }
+
+/* Generate cases — complex requirement flow */
+.gen-requirement-flow { width: 100%; margin-top: 12px; border: 1px solid #e0e6f2; border-radius: 13px; background: #fbfcff; overflow: hidden; }
+.gen-requirement-flow > header { min-height: 50px; padding: 10px 12px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid #e8ecf4; background: #f5f7fc; }
+.gen-requirement-flow > header > span { width: 31px; height: 31px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 9px; color: #4265ba; background: #e7edff; }
+.gen-requirement-flow > header strong, .gen-requirement-flow > header small { display: block; }
+.gen-requirement-flow > header strong { color: #344054; font-size: 10.5px; }
+.gen-requirement-flow > header small { margin-top: 2px; color: #8b96a8; font-size: 8.5px; line-height: 1.4; }
+.gen-flow-track { padding: 13px; display: flex; align-items: stretch; overflow-x: auto; scrollbar-width: thin; }
+.gen-flow-item { display: flex; align-items: center; flex: 0 0 auto; }
+.gen-flow-node { width: 160px; min-height: 126px; padding: 10px; display: flex; flex-direction: column; border: 1px solid #dfe4ee; border-radius: 11px; background: #fff; box-shadow: 0 4px 12px rgba(36,50,70,.05); }
+.gen-flow-node.decision { border-color: #efbfd0; background: #fff9fb; }
+.gen-flow-node.start, .gen-flow-node.end { border-color: #cfd9ef; background: #f8faff; }
+.gen-flow-node-label { display: flex; align-items: center; gap: 5px; color: #65718a; }
+.gen-flow-node-label > span { width: 23px; height: 23px; display: grid; place-items: center; border-radius: 7px; color: #4265ba; background: #e9eeff; }
+.gen-flow-node.decision .gen-flow-node-label > span { color: var(--pink); background: var(--pink-soft); }
+.gen-flow-node-label small { color: #7b8799; font-size: 8px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+.gen-flow-node > p { margin: 9px 0 8px; color: #344054; font-size: 9.5px; font-weight: 650; line-height: 1.45; }
+.gen-flow-next { margin-top: auto; display: flex; flex-direction: column; gap: 4px; }
+.gen-flow-next > span { display: flex; align-items: flex-start; gap: 4px; color: #7c8798; font-size: 7.5px; line-height: 1.35; }
+.gen-flow-next svg { margin-top: 1px; flex: 0 0 auto; color: #9aa7bd; }
+.gen-flow-connector { width: 32px; display: grid; place-items: center; color: #9ba8bd; }
+.gen-flow-connector svg:last-child { display: none; }
 
 /* Generate cases — editable table results */
 .gen-edit-table { height: clamp(320px, 52vh, 560px); }
@@ -1005,5 +1039,12 @@ textarea.gen-cell { resize: vertical; }
   .generator-chat-composer { border-radius: 18px; }
   .generator-chat-composer textarea { min-height: 120px; padding-inline: 11px; }
   .generator-chat-tools button { padding-inline: 9px; }
+  .generator-attachment-popover { width: min(268px, calc(100vw - 50px)); }
   .generator-chat-prompts { justify-content: flex-start; }
+  .gen-flow-track { flex-direction: column; overflow-x: hidden; }
+  .gen-flow-item { flex-direction: column; width: 100%; }
+  .gen-flow-node { width: 100%; min-height: 0; }
+  .gen-flow-connector { width: 100%; height: 28px; }
+  .gen-flow-connector svg:first-child { display: none; }
+  .gen-flow-connector svg:last-child { display: block; }
 }

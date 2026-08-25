@@ -15,6 +15,8 @@ from .models import (
     GeneratedCase,
     GenerationChatRequest,
     GenerationDecision,
+    GenerationFlowchart,
+    GenerationFlowNode,
     GenerationQuestion,
     GenerationTurnResponse,
 )
@@ -41,7 +43,8 @@ SYSTEM_PROMPT = (
     '{"action": "ask" | "generate", "message": string, "questions": [{"id": string, "question": string, '
     '"options": [string]}], "summary": string, "cases": [{"title": string, "case_type": "Web"|"API"|"Mobile", '
     '"priority": "P0"|"P1"|"P2", "preconditions": string, "test_steps": string, "expected_result": string, '
-    '"requirement": string}]}\n'
+    '"requirement": string}], "flowchart": null | {"title": string, "nodes": [{"id": string, '
+    '"label": string, "kind": "start"|"step"|"decision"|"end", "next": [string]}]}}\n'
     "Rules:\n"
     '- When action is "ask": message is a short reply to the author; provide 1-3 questions with unique ids (q1, q2, ...), '
     "each answerable in one sentence or by picking from options. Include options when a choice makes sense (for example "
@@ -50,6 +53,10 @@ SYSTEM_PROMPT = (
     "supported failure handling. Every case needs title, case_type, priority, preconditions, numbered newline-separated "
     "test_steps, expected_result and a short requirement label. Never invent product behavior or credentials. "
     "summary is one sentence describing the suite.\n"
+    '- For a complex requirement with multiple roles, states, integrations, or conditional outcomes, include a concise '
+    'flowchart with 4-8 nodes so the author can verify the understood workflow. Use decision nodes for genuine branches; '
+    'each next value must reference another node id. Return flowchart as null for simple requirements. The flowchart may '
+    'accompany either ask or generate, but must only describe behavior supported by the requirements.\n'
 )
 
 POST_GENERATION_PROMPT = (
@@ -85,6 +92,41 @@ def _coerce_questions(raw_questions: Any) -> list[GenerationQuestion]:
         options = [str(option).strip() for option in (raw.get("options") or []) if str(option).strip()]
         questions.append(GenerationQuestion(id=question_id, question=question[:300], options=options[:6]))
     return questions
+
+
+def _coerce_flowchart(raw_flowchart: Any) -> GenerationFlowchart | None:
+    if not isinstance(raw_flowchart, dict):
+        return None
+    raw_nodes = raw_flowchart.get("nodes")
+    if not isinstance(raw_nodes, list):
+        return None
+    nodes: list[GenerationFlowNode] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_nodes[:8], start=1):
+        if not isinstance(raw, dict):
+            continue
+        node_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("id") or f"step-{index}"))[:40]
+        label = str(raw.get("label") or "").strip()[:160]
+        if not node_id or not label or node_id in seen:
+            continue
+        kind = str(raw.get("kind") or "step").lower()
+        if kind not in {"start", "step", "decision", "end"}:
+            kind = "step"
+        seen.add(node_id)
+        nodes.append(GenerationFlowNode(id=node_id, label=label, kind=kind, next=[]))
+    if len(nodes) < 3:
+        return None
+    valid_ids = {node.id for node in nodes}
+    raw_by_id = {
+        re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("id") or f"step-{index}"))[:40]: raw
+        for index, raw in enumerate(raw_nodes[:8], start=1)
+        if isinstance(raw, dict)
+    }
+    for node in nodes:
+        raw_next = raw_by_id.get(node.id, {}).get("next") or []
+        node.next = [str(item) for item in raw_next if str(item) in valid_ids and str(item) != node.id][:3]
+    title = str(raw_flowchart.get("title") or "Requirement flow").strip()[:120]
+    return GenerationFlowchart(title=title or "Requirement flow", nodes=nodes)
 
 
 def _coerce_case(item: Any) -> dict[str, str] | None:
@@ -179,6 +221,7 @@ def _parse_decision(raw: Any) -> GenerationDecision:
         raise RuntimeError("The AI service returned an invalid response.")
     action = str(raw.get("action") or "generate").strip().lower()
     message = str(raw.get("message") or "").strip()
+    flowchart = _coerce_flowchart(raw.get("flowchart"))
 
     if action == "ask":
         questions = _coerce_questions(raw.get("questions"))
@@ -187,11 +230,12 @@ def _parse_decision(raw: Any) -> GenerationDecision:
                 action="ask",
                 message=message or "I need a little more detail before I can build the suite.",
                 questions=questions,
+                flowchart=flowchart,
             )
         # The model asked for clarification but returned no usable questions — do not dead-end the conversation.
 
     if action == "reply":
-        return GenerationDecision(action="reply", message=message or "OK.")
+        return GenerationDecision(action="reply", message=message or "OK.", flowchart=flowchart)
 
     cases = [coerced for coerced in (_coerce_case(item) for item in (raw.get("cases") or [])) if coerced]
     cases = cases[:MAX_CASES]
@@ -203,12 +247,14 @@ def _parse_decision(raw: Any) -> GenerationDecision:
                 action="update",
                 message=message or f"Prepared {len(operations)} safe draft change(s).",
                 operations=operations,
+                flowchart=flowchart,
             )
         # An empty list is a legitimate outcome here: the author asked to remove cases.
         return GenerationDecision(
             action="update",
             message=message or (f"Updated the suite ({len(cases)} case(s) remaining)." if cases else "Removed the selected cases."),
             cases=[GeneratedCase(**case) for case in cases],
+            flowchart=flowchart,
         )
 
     if not cases:
@@ -219,6 +265,7 @@ def _parse_decision(raw: Any) -> GenerationDecision:
         message=message or summary,
         summary=summary,
         cases=[GeneratedCase(**case) for case in cases],
+        flowchart=flowchart,
     )
 
 
@@ -447,6 +494,7 @@ def _state_from_decision(decision: GenerationDecision) -> dict[str, Any]:
         "cases": [case.model_dump() for case in decision.cases],
         "operations": [operation.model_dump() for operation in decision.operations],
         "suggestions": [suggestion.model_dump() for suggestion in decision.suggestions],
+        "flowchart": decision.flowchart.model_dump() if decision.flowchart else None,
     }
 
 
@@ -458,9 +506,10 @@ def _to_turn(session_id: str, decision: GenerationDecision) -> GenerationTurnRes
             action="ask",
             message=decision.message,
             questions=decision.questions,
+            flowchart=decision.flowchart,
         )
     if decision.action == "reply":
-        return GenerationTurnResponse(session_id=session_id, status="working", action="reply", message=decision.message)
+        return GenerationTurnResponse(session_id=session_id, status="working", action="reply", message=decision.message, flowchart=decision.flowchart)
     if decision.action == "update":
         return GenerationTurnResponse(
             session_id=session_id,
@@ -470,6 +519,7 @@ def _to_turn(session_id: str, decision: GenerationDecision) -> GenerationTurnRes
             cases=decision.cases,
             operations=decision.operations,
             suggestions=decision.suggestions,
+            flowchart=decision.flowchart,
         )
     return GenerationTurnResponse(
         session_id=session_id,
@@ -480,6 +530,7 @@ def _to_turn(session_id: str, decision: GenerationDecision) -> GenerationTurnRes
         cases=decision.cases,
         operations=decision.operations,
         suggestions=decision.suggestions,
+        flowchart=decision.flowchart,
     )
 
 
@@ -617,6 +668,7 @@ def session_state(session_id: str) -> GenerationTurnResponse | None:
         cases=[GeneratedCase.model_validate(item) for item in state.get("cases") or []],
         operations=state.get("operations") or [],
         suggestions=state.get("suggestions") or [],
+        flowchart=GenerationFlowchart.model_validate(state["flowchart"]) if state.get("flowchart") else None,
     )
 
 

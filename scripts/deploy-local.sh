@@ -152,10 +152,6 @@ ensure_dependencies() {
 }
 
 start_services() {
-  # Clear stale PID files left by an interrupted terminal session.
-  rm -f "${FRONTEND_PID_FILE}" "${BACKEND_PID_FILE}" \
-    "${STATE_DIR}/server.pid" "${STATE_DIR}/agent.pid"
-
   check_port_is_free "frontend" "${FRONTEND_PORT}"
   check_port_is_free "backend" "${BACKEND_PORT}"
   ensure_dependencies
