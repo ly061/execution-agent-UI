@@ -8,9 +8,10 @@ from typing import Any
 
 import httpx
 
-from . import database
+from . import database, project_memory
 from .llm import DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 from .models import (
+    CasePatchOperation,
     GeneratedCase,
     GenerationChatRequest,
     GenerationDecision,
@@ -31,6 +32,9 @@ SYSTEM_PROMPT = (
     "cannot be inferred from the requirements. Typical gaps are the target platform (Web/API/Mobile), priority or "
     "severity expectations, key user roles or permissions, scope boundaries (must-have vs out of scope), "
     "environment or data constraints, and business rules the author implies but does not state. "
+    "A project_context object may contain approved project memories, a learned style profile, a source template, "
+    "and representative historical cases. Treat it as guidance, never as a reason to contradict the requirements. "
+    "Follow its terminology and writing style when applicable, and never mix knowledge from another project. "
     "Never ask about anything already answered in the conversation or inferable from the requirements, and never "
     "ask more than 3 questions in one turn — prefer the smallest set that changes the suite.\n"
     "Return JSON only, with exactly this shape:\n"
@@ -53,16 +57,17 @@ POST_GENERATION_PROMPT = (
     "The draft is provided as current_cases, numbered from case 1 in list order. The author may ask you to explain "
     "cases, change fields of a specific case, add new coverage, or remove cases.\n"
     "Return JSON only, with exactly this shape:\n"
-    '{"action": "reply" | "update", "message": string, "cases": [{"title": string, "case_type": "Web"|"API"|"Mobile", '
-    '"priority": "P0"|"P1"|"P2", "preconditions": string, "test_steps": string, "expected_result": string, '
-    '"requirement": string}]}\n'
+    '{"action": "reply" | "update", "message": string, "operations": ['
+    '{"op": "update", "case_id": string, "field": string, "value": any} | '
+    '{"op": "remove", "case_id": string} | {"op": "add", "case": {"title": string, '
+    '"case_type": "Web"|"API"|"Mobile", "priority": "P0"|"P1"|"P2", "preconditions": string, '
+    '"test_steps": string, "expected_result": string, "requirement": string}}]}\n'
     "Rules:\n"
     '- When action is "reply": answer with message only (explanations, analysis, or a short reply). Do not include cases.\n'
-    '- When action is "update": message briefly states what changed, and cases is the COMPLETE updated suite in the '
-    "same order: keep every existing case unless the author asked to remove it, apply requested edits only to the "
-    "referenced case(s) by their number (case 1, case 2, ...), and append new cases at the end. Never drop, reorder or "
-    "rewrite cases the author did not ask to change. Keep case_type to Web/API/Mobile, priority to P0/P1/P2, and "
-    "numbered newline-separated test_steps. Never invent credentials.\n"
+    '- When action is "update": return only the minimum operations needed. Resolve a numbered reference against '
+    "current_cases, then copy its exact case_id into the operation. Never return a complete rewritten suite. "
+    "The server applies and validates operations, so untouched cases remain byte-for-byte unchanged. Keep case_type "
+    "to Web/API/Mobile, priority to P0/P1/P2, and numbered newline-separated test_steps. Never invent credentials.\n"
 )
 
 
@@ -107,6 +112,68 @@ def _coerce_case(item: Any) -> dict[str, str] | None:
     }
 
 
+def _coerce_operations(raw_operations: Any) -> list[CasePatchOperation]:
+    if not isinstance(raw_operations, list):
+        return []
+    operations: list[CasePatchOperation] = []
+    editable = {"title", "case_type", "priority", "preconditions", "test_steps", "expected_result", "requirement"}
+    for raw in raw_operations[:MAX_CASES]:
+        if not isinstance(raw, dict) or raw.get("op") not in {"add", "update", "remove"}:
+            continue
+        op = str(raw["op"])
+        case_id = str(raw.get("case_id") or "").strip() or None
+        index = raw.get("index") if isinstance(raw.get("index"), int) and raw.get("index") > 0 else None
+        if op == "add":
+            case = _coerce_case(raw.get("case"))
+            if case:
+                operations.append(CasePatchOperation(op="add", case=GeneratedCase(**case)))
+        elif op == "remove" and (case_id or index):
+            operations.append(CasePatchOperation(op="remove", case_id=case_id, index=index))
+        elif op == "update" and (case_id or index) and raw.get("field") in editable:
+            operations.append(
+                CasePatchOperation(
+                    op="update",
+                    case_id=case_id,
+                    index=index,
+                    field=raw["field"],
+                    value=raw.get("value"),
+                )
+            )
+    return operations
+
+
+def apply_case_operations(
+    current_cases: list[GeneratedCase], operations: list[CasePatchOperation]
+) -> list[GeneratedCase]:
+    """Apply validated patches while preserving every untouched case and its stable ID."""
+    cases = [case.model_copy(deep=True) for case in current_cases]
+    for operation in operations:
+        if operation.op == "add":
+            if operation.case is None:
+                raise ValueError("An add operation requires a complete case.")
+            cases.append(operation.case.model_copy(deep=True))
+            continue
+        target = next(
+            (index for index, case in enumerate(cases) if operation.case_id and case.case_id == operation.case_id),
+            None,
+        )
+        if target is None and operation.index is not None and operation.index <= len(cases):
+            target = operation.index - 1
+        if target is None:
+            raise ValueError(f"Patch target {operation.case_id or operation.index!r} was not found in the draft.")
+        if operation.op == "remove":
+            cases.pop(target)
+            continue
+        if operation.field is None:
+            raise ValueError("An update operation requires an editable field.")
+        payload = cases[target].model_dump()
+        payload[operation.field] = operation.value
+        cases[target] = GeneratedCase.model_validate(payload)
+    if len(cases) > MAX_CASES:
+        raise ValueError(f"A draft cannot contain more than {MAX_CASES} cases.")
+    return cases
+
+
 def _parse_decision(raw: Any) -> GenerationDecision:
     if not isinstance(raw, dict):
         raise RuntimeError("The AI service returned an invalid response.")
@@ -130,6 +197,13 @@ def _parse_decision(raw: Any) -> GenerationDecision:
     cases = cases[:MAX_CASES]
 
     if action == "update":
+        operations = _coerce_operations(raw.get("operations"))
+        if operations:
+            return GenerationDecision(
+                action="update",
+                message=message or f"Prepared {len(operations)} safe draft change(s).",
+                operations=operations,
+            )
         # An empty list is a legitimate outcome here: the author asked to remove cases.
         return GenerationDecision(
             action="update",
@@ -320,6 +394,7 @@ def _context_payload(
     latest_message: str = "",
     latest_answers: list[dict[str, str]] | None = None,
     current_cases: list[dict[str, Any]] | None = None,
+    project_context: dict[str, Any] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -328,6 +403,7 @@ def _context_payload(
             "current_cases": current_cases or [],
             "latest_message": latest_message,
             "latest_answers": latest_answers or [],
+            "project_context": project_context or {},
         },
         ensure_ascii=False,
     )
@@ -369,6 +445,8 @@ def _state_from_decision(decision: GenerationDecision) -> dict[str, Any]:
         "questions": [question.model_dump() for question in decision.questions],
         "summary": decision.summary,
         "cases": [case.model_dump() for case in decision.cases],
+        "operations": [operation.model_dump() for operation in decision.operations],
+        "suggestions": [suggestion.model_dump() for suggestion in decision.suggestions],
     }
 
 
@@ -390,6 +468,8 @@ def _to_turn(session_id: str, decision: GenerationDecision) -> GenerationTurnRes
             action="update",
             message=decision.message,
             cases=decision.cases,
+            operations=decision.operations,
+            suggestions=decision.suggestions,
         )
     return GenerationTurnResponse(
         session_id=session_id,
@@ -398,7 +478,21 @@ def _to_turn(session_id: str, decision: GenerationDecision) -> GenerationTurnRes
         message=decision.message,
         summary=decision.summary,
         cases=decision.cases,
+        operations=decision.operations,
+        suggestions=decision.suggestions,
     )
+
+
+def _with_quality_review(
+    decision: GenerationDecision,
+    requirements_text: str,
+    memory_context: dict[str, Any],
+) -> GenerationDecision:
+    if decision.action in {"generate", "update"}:
+        decision.suggestions = project_memory.quality_suggestions(
+            requirements_text, decision.cases, memory_context
+        )
+    return decision
 
 
 async def start_session(
@@ -406,20 +500,33 @@ async def start_session(
     source: str,
     requirements_text: str,
     request_api_key: str | None = None,
+    *,
+    project_id: str = "default",
+    user_id: str | None = None,
 ) -> GenerationTurnResponse:
     api_key = _require_api_key(request_api_key)
     requirements_text = requirements_text.strip()
     if not requirements_text:
         raise ValueError("Enter or upload some requirements first.")
     requirements_text = requirements_text[:MAX_DOCUMENT_CHARS]
+    memory_context = project_memory.retrieve_context(project_id, user_id, requirements_text)
     decision = await _call_model(
         api_key,
         [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _context_payload(requirements_text, [])},
+            {"role": "user", "content": _context_payload(requirements_text, [], project_context=memory_context)},
         ],
     )
-    database.create_generation_session(session_id, source, requirements_text, _state_from_decision(decision))
+    decision = _with_quality_review(decision, requirements_text, memory_context)
+    database.create_generation_session(
+        session_id,
+        source,
+        requirements_text,
+        _state_from_decision(decision),
+        project_id=project_id,
+        user_id=user_id,
+        memory_snapshot=memory_context,
+    )
     preview = requirements_text if len(requirements_text) <= 600 else f"{requirements_text[:600]}…"
     database.save_generation_message(
         session_id,
@@ -453,6 +560,7 @@ async def continue_session(
     if not request.cases and not request.message.strip() and not request.answers:
         raise ValueError("Answer the questions or type a message first.")
     history = _history_context(session_id)
+    memory_context = json.loads(row["memory_snapshot_json"] or "{}")
     answers = [answer.model_dump() for answer in request.answers]
     if request.cases:
         prompt = POST_GENERATION_PROMPT
@@ -462,14 +570,20 @@ async def continue_session(
             request.message,
             answers,
             [case.model_dump() for case in request.cases],
+            project_context=memory_context,
         )
         decision = _deterministic_draft_change(request, request.cases) or await _call_model(
             api_key, [{"role": "system", "content": prompt}, {"role": "user", "content": payload}]
         )
+        if decision.operations:
+            decision.cases = apply_case_operations(request.cases, decision.operations)
     else:
         prompt = SYSTEM_PROMPT
-        payload = _context_payload(row["requirements_text"], history, request.message, answers)
+        payload = _context_payload(
+            row["requirements_text"], history, request.message, answers, project_context=memory_context
+        )
         decision = await _call_model(api_key, [{"role": "system", "content": prompt}, {"role": "user", "content": payload}])
+    decision = _with_quality_review(decision, row["requirements_text"], memory_context)
     database.save_generation_message(
         session_id,
         "user",
@@ -501,6 +615,8 @@ def session_state(session_id: str) -> GenerationTurnResponse | None:
         questions=[GenerationQuestion.model_validate(item) for item in state.get("questions") or []],
         summary=str(state.get("summary") or ""),
         cases=[GeneratedCase.model_validate(item) for item in state.get("cases") or []],
+        operations=state.get("operations") or [],
+        suggestions=state.get("suggestions") or [],
     )
 
 
@@ -509,6 +625,9 @@ async def stream_create_events(
     source: str,
     requirements_text: str,
     request_api_key: str | None = None,
+    *,
+    project_id: str = "default",
+    user_id: str | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Stream a session-start turn: ("thinking", ...) events then ("result", ...)."""
     api_key = _require_api_key(request_api_key)
@@ -516,9 +635,10 @@ async def stream_create_events(
     if not requirements_text:
         raise ValueError("Enter or upload some requirements first.")
     requirements_text = requirements_text[:MAX_DOCUMENT_CHARS]
+    memory_context = project_memory.retrieve_context(project_id, user_id, requirements_text)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": _context_payload(requirements_text, [])},
+        {"role": "user", "content": _context_payload(requirements_text, [], project_context=memory_context)},
     ]
     decision: GenerationDecision | None = None
     async for event, data in _stream_model_events(api_key, messages):
@@ -528,7 +648,16 @@ async def stream_create_events(
             decision = data
     if decision is None:
         return
-    database.create_generation_session(session_id, source, requirements_text, _state_from_decision(decision))
+    decision = _with_quality_review(decision, requirements_text, memory_context)
+    database.create_generation_session(
+        session_id,
+        source,
+        requirements_text,
+        _state_from_decision(decision),
+        project_id=project_id,
+        user_id=user_id,
+        memory_snapshot=memory_context,
+    )
     preview = requirements_text if len(requirements_text) <= 600 else f"{requirements_text[:600]}…"
     database.save_generation_message(
         session_id,
@@ -564,6 +693,7 @@ async def stream_turn_events(
     if not request.cases and not request.message.strip() and not request.answers:
         raise ValueError("Answer the questions or type a message first.")
     history = _history_context(session_id)
+    memory_context = json.loads(row["memory_snapshot_json"] or "{}")
     answers = [answer.model_dump() for answer in request.answers]
     decision = _deterministic_draft_change(request, request.cases) if request.cases else None
     if decision is None:
@@ -575,10 +705,13 @@ async def stream_turn_events(
                 request.message,
                 answers,
                 [case.model_dump() for case in request.cases],
+                project_context=memory_context,
             )
         else:
             prompt = SYSTEM_PROMPT
-            payload = _context_payload(row["requirements_text"], history, request.message, answers)
+            payload = _context_payload(
+                row["requirements_text"], history, request.message, answers, project_context=memory_context
+            )
         async for event, data in _stream_model_events(
             api_key, [{"role": "system", "content": prompt}, {"role": "user", "content": payload}]
         ):
@@ -588,6 +721,9 @@ async def stream_turn_events(
                 decision = data
     if decision is None:
         return
+    if decision.operations:
+        decision.cases = apply_case_operations(request.cases, decision.operations)
+    decision = _with_quality_review(decision, row["requirements_text"], memory_context)
     database.save_generation_message(
         session_id,
         "user",

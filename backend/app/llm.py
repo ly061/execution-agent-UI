@@ -16,8 +16,8 @@ def deepseek_enabled() -> bool:
     return bool(os.getenv("DEEPSEEK_API_KEY"))
 
 
-def create_deepseek_model(*, temperature: float = 0) -> ChatOpenAI:
-    api_key = os.getenv("DEEPSEEK_API_KEY")
+def create_deepseek_model(*, temperature: float = 0, api_key: str | None = None) -> ChatOpenAI:
+    api_key = (api_key or os.getenv("DEEPSEEK_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not configured")
     return ChatOpenAI(

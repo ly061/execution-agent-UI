@@ -6,7 +6,7 @@ Interactive test-management frontend prototype covering Test Plans, Test Sets, T
 
 ## Local browser execution agent
 
-The first executable Local Agent MVP lives in [`local-agent/`](local-agent/README.md). It provides a macOS/Windows Electron app backed by a Python BrowserUse runtime, isolated per-run browser profiles and workspaces, launch-scoped pairing tokens, live logs, cancellation, and a localhost-only API. The web run dialog can pair with the desktop app and shows local task state on the Test Runs page.
+The Local Agent lives in [`local-agent/`](local-agent/README.md). Its target stack is PySide6 + QML/Qt Quick with a Python BrowserUse backend. The Server creates enrollment API keys and immutable Run Plans; authenticated Agents register their device, send heartbeats, claim queued plans, execute them in isolated browser profiles and upload status and results. The previous Electron shell remains temporarily as a migration fallback.
 
 ## LangChain test case agents
 
@@ -24,6 +24,22 @@ The Test cases → Generate cases flow is an interactive clarify-then-generate c
 - **Generation keeps the conversation open.** The results view pairs an editable table with a live agent chat: ask it to explain a case, change fields, add edge coverage, or remove cases — it returns either a plain `reply` or an `update` with the complete revised suite.
 - **The AI's thinking process is streamed.** The interactive flow enables DeepSeek thinking mode and streams `reasoning_content` over SSE (`POST /api/generation/sessions/stream` and `/chat/stream`) — you watch the reasoning appear live in a collapsible panel, and each finished turn keeps its reasoning behind a small "AI thinking process" toggle.
 - Sessions persist in the SQLite agent database, so a finished session can be resumed (`GET /api/generation/sessions/{id}`).
+
+### Project learning, memory and Deep Agents
+
+Generation is scoped by `project_id` (and optionally `user_id`). A project can learn from an approved XLSX/XLS/CSV suite through `POST /api/projects/{project_id}/learning/cases`. The server derives:
+
+- a deterministic column/sheet template profile and keeps the source XLSX for format-preserving export;
+- a writing-style profile with language, title pattern, step format, priority distribution and representative examples;
+- a procedural memory candidate that must be approved before retrieval.
+
+Memories are typed as semantic, episodic or procedural and move through `candidate → active → deprecated`. Only active memories are injected into generation; retrieval is strictly project-scoped and the exact snapshot is saved with the generation session. Manage them with `GET/POST /api/projects/{project_id}/memories` and `PATCH /api/projects/{project_id}/memories/{memory_id}`.
+
+Draft edits now prefer validated operations (`add`, `update`, `remove`) addressed by stable case IDs. The server applies each patch to the existing draft so unrelated cases cannot be silently rewritten. Deterministic quality checks return proactive coverage and quality suggestions with each generated or updated suite.
+
+`POST /api/projects/{project_id}/agent/chat` exposes a Deep Agents 0.7 supervisor with requirement-analysis, coverage-review and template-specialist subagents. Its tools are permanently bound to the selected project. It can retrieve context and propose candidate memories, but it cannot activate memory or directly mutate cases.
+
+Use `POST /api/projects/{project_id}/export` to render selected generated cases back into the learned project workbook.
 
 On the static GitHub Pages preview the same three-stage flow runs fully in the browser with a deterministic local generator (text-only inputs).
 
@@ -51,7 +67,7 @@ Open `http://localhost:4173/`.
 ./deploy-local.sh
 ```
 
-This installs locked dependencies, builds the production site and starts it in the background at `http://localhost:4173/`. The committed SQLite mock database is served with the application.
+This stops any existing local deployment, installs locked dependencies, builds the latest production site and starts it in the background at `http://localhost:4173/`. The committed SQLite mock database is served with the application.
 It also installs and starts the LangChain import API at `http://127.0.0.1:8000/`.
 
 ```bash

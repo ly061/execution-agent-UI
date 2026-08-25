@@ -74,7 +74,19 @@ stop_process() {
     sleep 0.25
   done
 
-  echo "${name} did not stop cleanly (PID ${pid})." >&2
+  echo "${name} did not stop gracefully; forcing it to stop (PID ${pid})." >&2
+  kill -KILL "${pid}" 2>/dev/null || true
+
+  for _ in {1..20}; do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      rm -f "${pid_file}"
+      echo "Stopped ${name}."
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  echo "Unable to stop ${name} (PID ${pid})." >&2
   return 1
 }
 
@@ -140,13 +152,6 @@ ensure_dependencies() {
 }
 
 start_services() {
-  if pid_is_running "${FRONTEND_PID_FILE}" && pid_is_running "${BACKEND_PID_FILE}" \
-    && url_is_ready "${frontend_url}" && url_is_ready "${backend_health_url}"; then
-    echo "QA Orbit is already running."
-    print_status
-    return 0
-  fi
-
   # Clear stale PID files left by an interrupted terminal session.
   rm -f "${FRONTEND_PID_FILE}" "${BACKEND_PID_FILE}" \
     "${STATE_DIR}/server.pid" "${STATE_DIR}/agent.pid"
@@ -194,6 +199,14 @@ start_services() {
   print_status
 }
 
+deploy_services() {
+  echo "Stopping the existing local deployment (if any)..."
+  stop_services
+
+  echo "Deploying the latest local build..."
+  start_services
+}
+
 print_status() {
   local frontend_state="stopped"
   local backend_state="stopped"
@@ -220,14 +233,13 @@ show_logs() {
 
 case "${COMMAND}" in
   start)
-    start_services
+    deploy_services
     ;;
   stop)
     stop_services
     ;;
   restart)
-    stop_services
-    start_services
+    deploy_services
     ;;
   status)
     print_status

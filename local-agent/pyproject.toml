@@ -1,0 +1,20 @@
+[project]
+name = "qa-orbit-local-agent"
+version = "0.2.0"
+requires-python = ">=3.11"
+
+[tool.pyside6-project]
+files = [
+  "app.py",
+  "qml/Main.qml",
+  "qa_orbit_desktop/__init__.py",
+  "qa_orbit_desktop/agent_loop.py",
+  "qa_orbit_desktop/api_client.py",
+  "qa_orbit_desktop/controller.py",
+  "runtime/__init__.py",
+  "runtime/qa_orbit_agent/__init__.py",
+  "runtime/qa_orbit_agent/browser_use_runner.py",
+  "runtime/qa_orbit_agent/models.py",
+  "runtime/qa_orbit_agent/server.py",
+  "runtime/qa_orbit_agent/store.py",
+]

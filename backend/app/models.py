@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -125,6 +126,7 @@ class CaseAssistResponse(BaseModel):
 
 
 class GeneratedCase(BaseModel):
+    case_id: str = Field(default_factory=lambda: f"case_{uuid.uuid4().hex[:12]}")
     title: str
     case_type: Literal["Web", "API", "Mobile"] = "Web"
     priority: Literal["P0", "P1", "P2"] = "P1"
@@ -132,6 +134,28 @@ class GeneratedCase(BaseModel):
     test_steps: str
     expected_result: str
     requirement: str = ""
+
+
+class AgentSuggestion(BaseModel):
+    id: str = Field(default_factory=lambda: f"suggestion_{uuid.uuid4().hex[:12]}")
+    category: Literal["ambiguity", "coverage", "quality", "memory", "template"]
+    severity: Literal["info", "warning", "critical"] = "info"
+    title: str
+    detail: str
+    evidence: list[str] = Field(default_factory=list)
+    related_case_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.7, ge=0, le=1)
+
+
+class CasePatchOperation(BaseModel):
+    op: Literal["add", "update", "remove"]
+    case_id: str | None = None
+    index: int | None = Field(default=None, ge=1)
+    field: Literal[
+        "title", "case_type", "priority", "preconditions", "test_steps", "expected_result", "requirement"
+    ] | None = None
+    value: Any = None
+    case: GeneratedCase | None = None
 
 
 class GenerationResponse(BaseModel):
@@ -154,6 +178,8 @@ class GenerationDecision(BaseModel):
     questions: list[GenerationQuestion] = Field(default_factory=list)
     summary: str = ""
     cases: list[GeneratedCase] = Field(default_factory=list)
+    operations: list[CasePatchOperation] = Field(default_factory=list)
+    suggestions: list[AgentSuggestion] = Field(default_factory=list)
 
 
 class GenerationTurnResponse(BaseModel):
@@ -164,6 +190,8 @@ class GenerationTurnResponse(BaseModel):
     questions: list[GenerationQuestion] = Field(default_factory=list)
     summary: str = ""
     cases: list[GeneratedCase] = Field(default_factory=list)
+    operations: list[CasePatchOperation] = Field(default_factory=list)
+    suggestions: list[AgentSuggestion] = Field(default_factory=list)
 
 
 class GenerationAnswer(BaseModel):
@@ -175,6 +203,92 @@ class GenerationChatRequest(BaseModel):
     message: str = Field(default="", max_length=2000)
     answers: list[GenerationAnswer] = Field(default_factory=list)
     cases: list[GeneratedCase] = Field(default_factory=list)
+
+
+class MemoryCreateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=10000)
+    memory_type: Literal["semantic", "episodic", "procedural"] = "semantic"
+    user_id: str | None = Field(default=None, max_length=120)
+    confidence: float = Field(default=0.8, ge=0, le=1)
+    source_ids: list[str] = Field(default_factory=list)
+    status: Literal["candidate", "active"] = "candidate"
+
+
+class MemoryRecord(BaseModel):
+    id: str
+    project_id: str
+    user_id: str | None = None
+    memory_type: Literal["semantic", "episodic", "procedural"]
+    content: str
+    confidence: float
+    support_count: int
+    status: Literal["candidate", "active", "deprecated"]
+    source_ids: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class MemoryStatusRequest(BaseModel):
+    status: Literal["candidate", "active", "deprecated"]
+
+
+class StyleProfile(BaseModel):
+    project_id: str
+    user_id: str | None = None
+    language: str = "mixed"
+    title_pattern: str = "descriptive"
+    average_title_length: float = 0
+    step_style: str = "plain"
+    expected_granularity: str = "case_level"
+    priority_distribution: dict[str, int] = Field(default_factory=dict)
+    preferred_terms: list[str] = Field(default_factory=list)
+    sample_count: int = 0
+    examples: list[dict[str, Any]] = Field(default_factory=list)
+    source_import_id: str = ""
+
+
+class TemplateProfile(BaseModel):
+    id: str
+    project_id: str
+    name: str
+    source_import_id: str
+    filename: str
+    sheets: list[dict[str, Any]] = Field(default_factory=list)
+    standard_fields: list[str] = Field(default_factory=list)
+    extra_fields: list[str] = Field(default_factory=list)
+    artifact_path: str = Field(default="", exclude=True)
+    active: bool = True
+    created_at: str = ""
+
+
+class ProjectLearningResponse(BaseModel):
+    project_id: str
+    import_id: str
+    imported_count: int
+    style_profile: StyleProfile
+    template_profile: TemplateProfile
+    memory_candidates: list[MemoryRecord] = Field(default_factory=list)
+    message: str
+
+
+class ProjectAgentRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=10000)
+    requirements: str = Field(default="", max_length=45000)
+    cases: list[GeneratedCase] = Field(default_factory=list)
+    user_id: str | None = Field(default=None, max_length=120)
+    thread_id: str | None = Field(default=None, max_length=200)
+    generation_session_id: str | None = Field(default=None, max_length=200)
+
+
+class ProjectAgentResponse(BaseModel):
+    message: str
+    thread_id: str
+    memory_candidates: list[MemoryRecord] = Field(default_factory=list)
+
+
+class CaseExportRequest(BaseModel):
+    cases: list[GeneratedCase] = Field(min_length=1, max_length=200)
+    filename: str | None = Field(default=None, max_length=200)
 
 
 class Change(BaseModel):
@@ -190,3 +304,64 @@ class ChatResponse(BaseModel):
     changes: list[Change] = Field(default_factory=list)
     cases: list[dict[str, Any]] = Field(default_factory=list)
     can_undo: bool = False
+
+
+class AgentKeyCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    project_id: str | None = Field(default=None, max_length=120)
+
+
+class AgentKeyCreated(BaseModel):
+    id: str
+    name: str
+    api_key: str
+    key_prefix: str
+    project_id: str | None = None
+    created_at: str
+
+
+class AgentSessionRequest(BaseModel):
+    api_key: str = Field(min_length=16, max_length=512)
+    device_id: str = Field(min_length=1, max_length=200)
+    device_name: str = Field(min_length=1, max_length=200)
+    platform: str = Field(default="unknown", max_length=80)
+    agent_version: str = Field(default="0.1.0", max_length=80)
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentSessionResponse(BaseModel):
+    access_token: str
+    expires_in: int
+    agent: dict[str, Any]
+
+
+class RunTarget(BaseModel):
+    type: Literal["test_case", "test_set", "test_plan", "batch_test_set", "rerun"]
+    id: int | None = None
+    ids: list[int] = Field(default_factory=list)
+    name: str = Field(min_length=1, max_length=300)
+
+
+class RunCreateRequest(BaseModel):
+    target: RunTarget
+    application: str = Field(min_length=1, max_length=200)
+    environment: str = Field(min_length=1, max_length=100)
+    build: str = Field(default="", max_length=120)
+    instructions: str = Field(default="", max_length=10000)
+    execution_target: Literal["local_agent", "server_worker", "device_farm"] = "local_agent"
+    assigned_agent_id: str | None = Field(default=None, max_length=120)
+    capture_screenshots: bool = True
+    headless: bool = False
+    max_steps: int = Field(default=50, ge=1, le=100)
+    allowed_domains: list[str] = Field(default_factory=list)
+
+
+class AgentClaimRequest(BaseModel):
+    lease_seconds: int = Field(default=60, ge=30, le=300)
+
+
+class RunPlanStatusRequest(BaseModel):
+    status: Literal["running", "paused", "completed", "failed", "cancelled", "interrupted"]
+    result: str = Field(default="", max_length=100000)
+    error: str = Field(default="", max_length=20000)
+    logs: list[str] = Field(default_factory=list)

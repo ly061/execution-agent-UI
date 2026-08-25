@@ -4,18 +4,20 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from . import database, generation_agent
+from . import database, deep_orchestrator, generation_agent, project_memory
 from .agent import chat
 from .importer import build_preview
 from .llm import DEEPSEEK_MODEL, deepseek_enabled
-from .models import CaseAssistRequest, CaseAssistResponse, ChatRequest, ChatResponse, ConfirmResponse, GenerationChatRequest, GenerationResponse, GenerationTurnResponse, ImportPreview
+from .execution import build_run_plan_snapshot
+from .models import AgentClaimRequest, AgentKeyCreated, AgentKeyCreateRequest, AgentSessionRequest, AgentSessionResponse, CaseAssistRequest, CaseAssistResponse, CaseExportRequest, ChatRequest, ChatResponse, ConfirmResponse, GenerationChatRequest, GenerationResponse, GenerationTurnResponse, ImportPreview, MemoryCreateRequest, MemoryRecord, MemoryStatusRequest, ProjectAgentRequest, ProjectAgentResponse, ProjectLearningResponse, RunCreateRequest, RunPlanStatusRequest
 from .case_assistant import assist_case
 from .generator import extract_document_text, generate_cases
+from .template_renderer import render_cases
 
 
 @asynccontextmanager
@@ -32,6 +34,14 @@ app.add_middleware(
     allow_methods=["*"] ,
     allow_headers=["*"],
 )
+
+
+def require_agent(authorization: str | None = Header(default=None)) -> dict[str, object]:
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    agent = database.agent_for_access_token(token) if token else None
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid or expired Local Agent session.")
+    return agent
 
 
 def _sse(events):
@@ -55,6 +65,78 @@ def health() -> dict[str, str]:
         "model": DEEPSEEK_MODEL,
         "model_configured": str(deepseek_enabled()).lower(),
     }
+
+
+@app.post("/api/agent-keys", response_model=AgentKeyCreated, status_code=201)
+def create_agent_key(request: AgentKeyCreateRequest) -> AgentKeyCreated:
+    """Create a Local Agent enrollment key. The plaintext key is returned once."""
+    return AgentKeyCreated.model_validate(database.create_agent_api_key(request.name, request.project_id))
+
+
+@app.get("/api/agent-keys")
+def list_agent_keys(project_id: str | None = None) -> dict[str, object]:
+    return {"agent_keys": database.list_agent_api_keys(project_id)}
+
+
+@app.delete("/api/agent-keys/{key_id}")
+def revoke_agent_key(key_id: str) -> dict[str, bool]:
+    if not database.revoke_agent_api_key(key_id):
+        raise HTTPException(status_code=404, detail="The Local Agent API key was not found.")
+    return {"revoked": True}
+
+
+@app.post("/api/agent/v1/sessions", response_model=AgentSessionResponse)
+def create_agent_session(request: AgentSessionRequest) -> AgentSessionResponse:
+    session = database.create_agent_session(
+        request.api_key,
+        device_id=request.device_id,
+        device_name=request.device_name,
+        platform=request.platform,
+        agent_version=request.agent_version,
+        capabilities=request.capabilities,
+    )
+    if not session:
+        raise HTTPException(status_code=401, detail="The Local Agent API key is invalid or revoked.")
+    return AgentSessionResponse.model_validate(session)
+
+
+@app.post("/api/agent/v1/heartbeat")
+def agent_heartbeat(agent: dict[str, object] = Depends(require_agent)) -> dict[str, object]:
+    return database.heartbeat_agent(str(agent["id"]))
+
+
+@app.post("/api/runs", status_code=201)
+def create_run(request: RunCreateRequest) -> dict[str, object]:
+    try:
+        snapshot = build_run_plan_snapshot(request)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    plan = database.create_execution_run(request, snapshot)
+    return {"run": {"id": plan["run_id"], "status": plan["status"]}, "run_plan": plan}
+
+
+@app.get("/api/run-plans")
+def run_plans() -> dict[str, object]:
+    return {"run_plans": database.list_run_plans()}
+
+
+@app.post("/api/agent/v1/run-plans/claim")
+def claim_run_plan(request: AgentClaimRequest, agent: dict[str, object] = Depends(require_agent)) -> dict[str, object]:
+    return {"run_plan": database.claim_run_plan(str(agent["id"]), request.lease_seconds)}
+
+
+@app.post("/api/agent/v1/run-plans/{run_plan_id}/status")
+def update_run_plan(
+    run_plan_id: str,
+    request: RunPlanStatusRequest,
+    agent: dict[str, object] = Depends(require_agent),
+) -> dict[str, object]:
+    plan = database.update_run_plan_status(
+        str(agent["id"]), run_plan_id, request.status, request.result, request.error, request.logs
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="Run Plan was not found or is assigned to another Agent.")
+    return {"run_plan": plan}
 
 
 @app.post("/api/config/validate")
@@ -94,6 +176,8 @@ async def generate_test_cases(file: UploadFile = File(...), x_deepseek_api_key: 
 async def create_generation_session(
     text: str | None = Form(default=None),
     file: UploadFile | None = File(default=None),
+    project_id: str = Form(default="default"),
+    user_id: str | None = Form(default=None),
     x_deepseek_api_key: str | None = Header(default=None),
 ) -> GenerationTurnResponse:
     """Start an interactive generation session from pasted text or an uploaded document."""
@@ -104,7 +188,9 @@ async def create_generation_session(
         else:
             source = "Pasted requirements"
             requirements = text or ""
-        return await generation_agent.start_session(uuid.uuid4().hex, source, requirements, x_deepseek_api_key)
+        return await generation_agent.start_session(
+            uuid.uuid4().hex, source, requirements, x_deepseek_api_key, project_id=project_id, user_id=user_id
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except RuntimeError as error:
@@ -116,6 +202,8 @@ async def create_generation_session(
 async def create_generation_session_stream(
     text: str | None = Form(default=None),
     file: UploadFile | None = File(default=None),
+    project_id: str = Form(default="default"),
+    user_id: str | None = Form(default=None),
     x_deepseek_api_key: str | None = Header(default=None),
 ):
     """Same as the session start, but streams the AI thinking process as it works."""
@@ -132,7 +220,11 @@ async def create_generation_session_stream(
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     session_id = uuid.uuid4().hex
-    return _sse(generation_agent.stream_create_events(session_id, source, requirements, x_deepseek_api_key))
+    return _sse(
+        generation_agent.stream_create_events(
+            session_id, source, requirements, x_deepseek_api_key, project_id=project_id, user_id=user_id
+        )
+    )
 
 
 @app.post("/api/generation/sessions/{session_id}/chat", response_model=GenerationTurnResponse)
@@ -174,10 +266,20 @@ def get_generation_session(session_id: str) -> GenerationTurnResponse:
 
 
 @app.post("/api/imports/preview", response_model=ImportPreview)
-async def preview_import(file: UploadFile = File(...)) -> ImportPreview:
+async def preview_import(
+    file: UploadFile = File(...),
+    project_id: str = Form(default="default"),
+    user_id: str | None = Form(default=None),
+) -> ImportPreview:
     try:
         preview = build_preview(file.filename or "upload.xlsx", await file.read())
-        database.save_preview(preview.import_id, preview.filename, preview.model_dump(mode="json"))
+        database.save_preview(
+            preview.import_id,
+            preview.filename,
+            preview.model_dump(mode="json"),
+            project_id=project_id,
+            user_id=user_id,
+        )
         return preview
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -208,3 +310,128 @@ def agent_chat(import_id: str, request: ChatRequest) -> ChatResponse:
         return chat(import_id, request.message)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/projects/{project_id}/learning/cases", response_model=ProjectLearningResponse)
+async def learn_project_cases(
+    project_id: str,
+    file: UploadFile = File(...),
+    user_id: str | None = Form(default=None),
+) -> ProjectLearningResponse:
+    """Learn a deterministic template/style profile from approved historical cases."""
+    try:
+        content = await file.read()
+        preview = build_preview(file.filename or "historical-cases.xlsx", content)
+        database.save_preview(
+            preview.import_id,
+            preview.filename,
+            preview.model_dump(mode="json"),
+            project_id=project_id,
+            user_id=user_id,
+        )
+        return project_memory.learn_from_import(
+            preview.import_id, project_id, user_id, raw_template=content
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=422, detail=f"Unable to learn from workbook: {error}") from error
+
+
+@app.post("/api/projects/{project_id}/imports/{import_id}/learn", response_model=ProjectLearningResponse)
+def learn_confirmed_import(project_id: str, import_id: str, user_id: str | None = None) -> ProjectLearningResponse:
+    try:
+        return project_memory.learn_from_import(import_id, project_id, user_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/projects/{project_id}/profiles")
+def project_profiles(project_id: str, user_id: str | None = None) -> dict[str, object]:
+    template = database.get_active_template_profile(project_id)
+    if template:
+        template = {key: value for key, value in template.items() if key != "artifact_path"}
+    return {
+        "project_id": project_id,
+        "style_profile": database.get_style_profile(project_id, user_id),
+        "template_profile": template,
+    }
+
+
+@app.post("/api/projects/{project_id}/memories", response_model=MemoryRecord, status_code=201)
+def create_project_memory(project_id: str, request: MemoryCreateRequest) -> MemoryRecord:
+    try:
+        memory = database.save_memory(
+            project_id=project_id,
+            user_id=request.user_id,
+            memory_type=request.memory_type,
+            content=request.content,
+            confidence=request.confidence,
+            status=request.status,
+            source_ids=request.source_ids,
+        )
+        return MemoryRecord.model_validate(memory)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/projects/{project_id}/memories")
+def project_memories(
+    project_id: str,
+    user_id: str | None = None,
+    include_candidates: bool = True,
+) -> dict[str, object]:
+    statuses = ("active", "candidate") if include_candidates else ("active",)
+    return {
+        "project_id": project_id,
+        "memories": database.list_memories(
+            project_id, user_id=user_id, statuses=statuses, include_global=False
+        ),
+    }
+
+
+@app.patch("/api/projects/{project_id}/memories/{memory_id}", response_model=MemoryRecord)
+def set_project_memory_status(project_id: str, memory_id: str, request: MemoryStatusRequest) -> MemoryRecord:
+    memory = database.get_memory(memory_id)
+    if not memory or memory["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail="Project memory was not found.")
+    updated = database.update_memory_status(memory_id, request.status)
+    return MemoryRecord.model_validate(updated)
+
+
+@app.post("/api/projects/{project_id}/agent/chat", response_model=ProjectAgentResponse)
+async def project_agent_chat(
+    project_id: str,
+    request: ProjectAgentRequest,
+    x_deepseek_api_key: str | None = Header(default=None),
+) -> ProjectAgentResponse:
+    """Run the Deep Agents supervisor with project-scoped, read-mostly QA tools."""
+    try:
+        return await deep_orchestrator.advise_project(project_id, request, x_deepseek_api_key)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/projects/{project_id}/export")
+def export_project_cases(project_id: str, request: CaseExportRequest) -> Response:
+    profile = database.get_active_template_profile(project_id)
+    if not profile:
+        raise HTTPException(
+            status_code=409,
+            detail="Upload approved historical cases before exporting with a project template.",
+        )
+    filename, content = render_cases(profile, request.cases)
+    if request.filename:
+        requested = request.filename.rsplit(".", 1)[0].strip()
+        if requested:
+            filename = f"{requested}.xlsx"
+    safe_filename = "".join(
+        character for character in filename if character.isascii() and (character.isalnum() or character in "-_.")
+    )
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename or "generated-cases.xlsx"}"'},
+    )

@@ -18,6 +18,7 @@ class Task:
     allowed_domains: list[str] = field(default_factory=list)
     headless: bool = False
     max_steps: int = 50
+    run_plan_id: str = ""
     id: str = field(default_factory=lambda: str(uuid4()))
     status: str = "queued"
     created_at: str = field(default_factory=utc_now)

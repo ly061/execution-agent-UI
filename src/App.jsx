@@ -65,7 +65,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { cancelLocalRun, checkLocalAgent, getLocalAgentSettings, listLocalRuns, saveLocalAgentSettings, submitLocalRun } from "./localAgent.js";
+import { createServerRun, listServerRunPlans } from "./serverRuns.js";
 
 const NAV = [
   {
@@ -88,6 +88,7 @@ const NAV = [
       { id: "cases", label: "Test cases", icon: ListChecks },
       { id: "data", label: "My data", icon: Database },
       { id: "apps", label: "App config", icon: AppWindow },
+      { id: "agents", label: "Local agents", icon: Robot },
       { id: "security", label: "Security config", icon: ShieldCheck },
       { id: "settings", label: "Project settings", icon: GearSix },
     ],
@@ -101,6 +102,17 @@ const API_ORIGIN = "";
 
 const assetUrl = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 
+function runTargetPayload(target, type) {
+  const types = { "Test case": "test_case", "Test set": "test_set", "Test plan": "test_plan", "Batch test set": "batch_test_set", "Re-run": "rerun" };
+  const name = typeof target === "string" ? target : target.name || target.title || target.case_title || "Test run";
+  return {
+    type: types[type] || "test_case",
+    id: typeof target === "object" ? target.id || target.case_id || null : null,
+    ids: typeof target === "object" ? target.ids || [] : [],
+    name,
+  };
+}
+
 const resultTone = {
   Passed: "success",
   Failed: "danger",
@@ -111,8 +123,9 @@ const resultTone = {
   Terminated: "warning",
   "In progress": "info",
   Attention: "warning",
-  Ready: "success",
   Active: "success",
+  Revoked: "danger",
+  Ready: "success",
   Draft: "neutral",
   Healthy: "success",
   Idle: "success",
@@ -565,8 +578,8 @@ function TestRunsPage({ data, onRun, onToast }) {
   const [caseScope, setCaseScope] = useState(null);
   const [queue, setQueue] = useState(data.queue);
   const [queueExpanded, setQueueExpanded] = useState(false);
-  const [localRuns, setLocalRuns] = useState([]);
-  const [localAgentOnline, setLocalAgentOnline] = useState(false);
+  const [serverPlans, setServerPlans] = useState([]);
+  const [executionServerOnline, setExecutionServerOnline] = useState(false);
   const maxConcurrentRuns = 3;
   const queuedCount = queue.filter((item) => item.status === "Queued").length;
   const planRuns = useMemo(() => summarizeRuns(data.runs, "plan_name"), [data.runs]);
@@ -578,20 +591,19 @@ function TestRunsPage({ data, onRun, onToast }) {
   useEffect(() => {
     let active = true;
     let timer;
-    async function loadLocalRuns() {
-      if (!getLocalAgentSettings().token) return;
+    async function loadServerPlans() {
       try {
-        const payload = await listLocalRuns();
+        const payload = await listServerRunPlans();
         if (active) {
-          setLocalRuns(payload.tasks || []);
-          setLocalAgentOnline(true);
+          setServerPlans(payload.run_plans || []);
+          setExecutionServerOnline(true);
         }
       } catch {
-        if (active) setLocalAgentOnline(false);
+        if (active) setExecutionServerOnline(false);
       }
-      if (active) timer = setTimeout(loadLocalRuns, 3000);
+      if (active) timer = setTimeout(loadServerPlans, 3000);
     }
-    loadLocalRuns();
+    loadServerPlans();
     return () => {
       active = false;
       clearTimeout(timer);
@@ -621,12 +633,10 @@ function TestRunsPage({ data, onRun, onToast }) {
         description="Review test execution history, results and detailed evidence across cases, plans and sets."
       />
 
-      {getLocalAgentSettings().token && (
-        <section className="panel local-agent-panel">
-          <div className="local-agent-heading"><span className={`local-agent-orb ${localAgentOnline ? "online" : ""}`}><Robot size={19} weight="duotone" /></span><div><span className="panel-kicker">This device</span><strong>Local Agent</strong><small>{localAgentOnline ? `${localRuns.filter((task) => ["queued", "running"].includes(task.status)).length} active · isolated browser profiles` : "Desktop app is offline"}</small></div><StatusPill tone={localAgentOnline ? "success" : "neutral"}>{localAgentOnline ? "Connected" : "Offline"}</StatusPill></div>
-          {localRuns.length > 0 && <div className="local-run-list">{localRuns.slice(0, 4).map((task) => <div className="local-run-row" key={task.id}><span className={`local-run-state ${task.status}`} /><div><strong>{task.title}</strong><small>{task.id.slice(0, 8)} · {task.logs.at(-1) || "Waiting"}</small></div><StatusPill tone={task.status === "completed" ? "success" : task.status === "failed" ? "danger" : task.status === "running" ? "info" : "neutral"}>{task.status}</StatusPill>{["queued", "running"].includes(task.status) && <button className="danger-text-button" onClick={async () => { await cancelLocalRun(task.id); onToast(`Cancellation requested for ${task.id.slice(0, 8)}.`); }}>Cancel</button>}</div>)}</div>}
-        </section>
-      )}
+      <section className="panel local-agent-panel">
+        <div className="local-agent-heading"><span className={`local-agent-orb ${executionServerOnline ? "online" : ""}`}><Robot size={19} weight="duotone" /></span><div><span className="panel-kicker">Control plane</span><strong>Execution Agent Server</strong><small>{executionServerOnline ? `${serverPlans.filter((plan) => ["queued", "assigned", "running"].includes(plan.status)).length} active Run Plans` : "Execution server is unavailable"}</small></div><StatusPill tone={executionServerOnline ? "success" : "neutral"}>{executionServerOnline ? "Connected" : "Offline"}</StatusPill></div>
+        {serverPlans.length > 0 && <div className="local-run-list">{serverPlans.slice(0, 4).map((plan) => <div className="local-run-row" key={plan.id}><span className={`local-run-state ${plan.status}`} /><div><strong>{plan.snapshot?.target?.name || "Run Plan"}</strong><small>{plan.id.slice(0, 11)} · {plan.logs?.at(-1) || (plan.status === "queued" ? "Waiting for an authenticated Agent" : "Status updated by Local Agent")}</small></div><StatusPill tone={plan.status === "completed" ? "success" : plan.status === "failed" ? "danger" : plan.status === "running" ? "info" : "neutral"}>{plan.status}</StatusPill></div>)}</div>}
+      </section>
 
       <section className={`panel queue-panel queue-collapsible ${queueExpanded ? "expanded" : ""}`}>
         <button className="queue-summary-button" onClick={() => setQueueExpanded((expanded) => !expanded)} aria-expanded={queueExpanded}>
@@ -683,7 +693,7 @@ function TestRunsPage({ data, onRun, onToast }) {
       </section>
 
       {selectedRun && (
-        <RunDrawer run={selectedRun} onClose={() => setSelectedRun(null)} onRerun={() => onRun(selectedRun.case_title, "Re-run")} />
+        <RunDrawer run={selectedRun} onClose={() => setSelectedRun(null)} onRerun={() => onRun(selectedRun, "Re-run")} />
       )}
     </>
   );
@@ -822,7 +832,7 @@ function PlanDetail({ plan, sets, cases, setCaseMemberships, membership, setMemb
     <>
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Back to test plans</button>
       <PageHeader eyebrow={`Release ${plan.release}`} title={plan.name} description="Review plan coverage and add reusable test sets or individual test cases before execution."
-        actions={<><button className="secondary-button" onClick={() => onToast(`${plan.name} duplicated as a draft.`)}><Copy size={17} /> Duplicate</button><button className="primary-button" onClick={() => onRun(plan.name, "Test plan")}><Play size={16} weight="fill" /> Run plan</button></>} />
+        actions={<><button className="secondary-button" onClick={() => onToast(`${plan.name} duplicated as a draft.`)}><Copy size={17} /> Duplicate</button><button className="primary-button" onClick={() => onRun(plan, "Test plan")}><Play size={16} weight="fill" /> Run plan</button></>} />
 
       <section className="plan-detail-summary">
         <div><span>Status</span><StatusPill>{plan.status}</StatusPill></div>
@@ -910,7 +920,7 @@ function PlansPage({ plans, sets, cases, setCaseMemberships, planSets, planCases
               <div>
                 <IconButton label="Duplicate plan" onClick={() => onToast(`${plan.name} duplicated as a draft.`)}><Copy size={18} /></IconButton>
                 <button className="secondary-button compact" onClick={() => setSelectedPlanId(plan.id)}>View details</button>
-                <button className="primary-button compact" onClick={() => onRun(plan.name, "Test plan")}><Play size={15} weight="fill" /> Run</button>
+                <button className="primary-button compact" onClick={() => onRun(plan, "Test plan")}><Play size={15} weight="fill" /> Run</button>
               </div>
             </div>
           </article>
@@ -974,7 +984,7 @@ function SetsPage({ sets, cases, setCaseMemberships, setSetCaseMemberships, onRu
         actions={<><button className="secondary-button"><UploadSimple size={17} /> Upload set</button><button className="primary-button" onClick={() => onToast("New test set draft created.")}><Plus size={17} /> New test set</button></>} />
       <div className="filter-bar">
         <label className="search-field"><MagnifyingGlass size={18} /><input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="Search test sets" /></label>
-        {selected.length > 0 && <button className="primary-button compact" onClick={() => onRun(`${selected.length} selected test sets`, "Batch test set")}><Play size={15} weight="fill" /> Run selected ({selected.length})</button>}
+        {selected.length > 0 && <button className="primary-button compact" onClick={() => onRun({ name: `${selected.length} selected test sets`, ids: selected }, "Batch test set")}><Play size={15} weight="fill" /> Run selected ({selected.length})</button>}
       </div>
       <section className="panel flush-panel">
         <div className="table-wrap">
@@ -985,7 +995,7 @@ function SetsPage({ sets, cases, setCaseMemberships, setSetCaseMemberships, onRu
                 <td><input type="checkbox" checked={selected.includes(set.id)} onChange={() => toggle(set.id)} aria-label={`Select ${set.name}`} /></td>
                 <td><strong className="cell-primary">{set.name}</strong><span className="cell-secondary">SET-{String(set.id).padStart(4, "0")}</span></td>
                 <td>{set.case_count}</td><td>{set.case_type}</td><td>{set.build}</td><td>{set.updated_at}</td><td><StatusPill>{set.status}</StatusPill></td>
-                <td><div className="row-actions"><button className="text-button" onClick={() => setManagedSet(set)}>Manage cases</button><button className="primary-button compact" onClick={() => onRun(set.name, "Test set")}><Play size={14} weight="fill" /> Run</button></div></td>
+                <td><div className="row-actions"><button className="text-button" onClick={() => setManagedSet(set)}>Manage cases</button><button className="primary-button compact" onClick={() => onRun(set, "Test set")}><Play size={14} weight="fill" /> Run</button></div></td>
               </tr>
             ))}</tbody>
           </table>
@@ -1602,7 +1612,7 @@ function startLocalGeneration(text, sourceLabel) {
 }
 
 function continueLocalGeneration(text, answers, message, sourceLabel) {
-  return buildLocalCases(text, answers, sourceLabel);
+  return buildLocalCases(text, { ...answers, platform: message, priority: message }, sourceLabel);
 }
 
 const chineseToInt = (raw) => {
@@ -1729,16 +1739,15 @@ async function streamGenerationRequest(path, { form, json, onThinking }) {
   return result;
 }
 
-function CaseGenerationPage({ cases, onAdd, onToast }) {
+function CaseGenerationPage({ cases, project, onAdd, onToast }) {
   const inputRef = useRef(null);
+  const learnInputRef = useRef(null);
   const [stage, setStage] = useState("input");
-  const [inputMode, setInputMode] = useState("text");
   const [text, setText] = useState("");
   const [sourceLabel, setSourceLabel] = useState("");
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [questions, setQuestions] = useState([]);
-  const [answers, setAnswers] = useState({});
   const [composer, setComposer] = useState("");
   const [draft, setDraft] = useState(null);
   const [selected, setSelected] = useState([]);
@@ -1747,7 +1756,8 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
   const [dragging, setDragging] = useState(false);
   const [liveThinking, setLiveThinking] = useState("");
   const [reviewOpen, setReviewOpen] = useState(false);
-  const autoSubmitRef = useRef(false);
+  const [learnedProfile, setLearnedProfile] = useState(null);
+  const [projectMemories, setProjectMemories] = useState([]);
   const submittingRef = useRef(false);
   const clarifyRoundsRef = useRef(0);
 
@@ -1758,15 +1768,26 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [reviewOpen]);
 
+  useEffect(() => {
+    if (IS_GITHUB_PAGES || !project?.id) return;
+    Promise.all([
+      apiRequest(`/api/projects/${encodeURIComponent(String(project.id))}/profiles`),
+      apiRequest(`/api/projects/${encodeURIComponent(String(project.id))}/memories`),
+    ])
+      .then(([profile, memories]) => {
+        setLearnedProfile(profile.style_profile || profile.template_profile ? profile : null);
+        setProjectMemories(memories.memories || []);
+      })
+      .catch(() => {});
+  }, [project?.id]);
+
   function reset() {
     setStage("input");
-    setInputMode("text");
     setText("");
     setSourceLabel("");
     setSessionId(null);
     setMessages([]);
     setQuestions([]);
-    setAnswers({});
     setComposer("");
     setDraft(null);
     setSelected([]);
@@ -1774,7 +1795,6 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
     setError("");
     setLiveThinking("");
     setReviewOpen(false);
-    autoSubmitRef.current = false;
     submittingRef.current = false;
     clarifyRoundsRef.current = 0;
   }
@@ -1785,11 +1805,14 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
     setLiveThinking("");
     const action = response?.action || (response?.status === "asking" ? "ask" : "generate");
     if (action === "ask") {
-      setMessages((current) => [...current, { role: "agent", content: response.message, reasoning }]);
-      setQuestions(response.questions || []);
-      setAnswers({});
+      const nextQuestions = response.questions || [];
+      const missingQuestions = nextQuestions
+        .map((question) => question.question)
+        .filter((question) => question && !String(response.message || "").includes(question));
+      const content = [response.message, missingQuestions.join("\n")].filter(Boolean).join("\n\n");
+      setMessages((current) => [...current, { role: "agent", content, reasoning }]);
+      setQuestions(nextQuestions);
       setComposer("");
-      autoSubmitRef.current = false;
       submittingRef.current = false;
       clarifyRoundsRef.current += 1;
       setReviewOpen(false);
@@ -1799,7 +1822,6 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
     // reply / generate / update all keep the conversation visible and land on the results table.
     const previousLen = draft?.cases?.length || 0;
     setQuestions([]);
-    setAnswers({});
     setComposer("");
     setMessages((current) => [...current, { role: "agent", content: response.message, reasoning }]);
     if (action === "reply") {
@@ -1807,7 +1829,7 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
       return;
     }
     const nextCases = response?.cases || [];
-    setDraft({ summary: response?.summary || draft?.summary || "", cases: nextCases });
+    setDraft({ summary: response?.summary || draft?.summary || "", cases: nextCases, suggestions: response?.suggestions || [] });
     setSelected((current) => {
       const kept = current.filter((index) => index < nextCases.length);
       for (let index = previousLen; index < nextCases.length; index += 1) kept.push(index);
@@ -1831,6 +1853,7 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
       } else {
         const form = new FormData();
         form.append("text", content);
+        form.append("project_id", String(project.id));
         response = await streamGenerationRequest("/api/generation/sessions/stream", { form, onThinking: (chunk) => { thinking = chunk; setLiveThinking(chunk); } });
       }
       handleTurn(response, "Pasted requirements", thinking);
@@ -1858,6 +1881,7 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
       } else {
         const form = new FormData();
         form.append("file", file);
+        form.append("project_id", String(project.id));
         response = await streamGenerationRequest("/api/generation/sessions/stream", { form, onThinking: (chunk) => { thinking = chunk; setLiveThinking(chunk); } });
       }
       handleTurn(response, file.name, thinking);
@@ -1868,26 +1892,63 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
     }
   }
 
+  async function learnFromCases(file) {
+    if (!file || busy) return;
+    if (IS_GITHUB_PAGES) {
+      setError("Project learning requires the QA Orbit API service.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const learned = await apiRequest(`/api/projects/${encodeURIComponent(String(project.id))}/learning/cases`, {
+        method: "POST",
+        body: form,
+      });
+      setLearnedProfile({ style_profile: learned.style_profile, template_profile: learned.template_profile });
+      setProjectMemories((current) => [...learned.memory_candidates, ...current.filter((item) => !learned.memory_candidates.some((candidate) => candidate.id === item.id))]);
+      onToast(`Learned ${learned.imported_count} approved cases for ${project.name}.`);
+    } catch (learnError) {
+      setError(learnError.message);
+    } finally {
+      setBusy(false);
+      if (learnInputRef.current) learnInputRef.current.value = "";
+    }
+  }
+
+  async function setMemoryStatus(memory, status) {
+    try {
+      const updated = await apiRequest(`/api/projects/${encodeURIComponent(String(project.id))}/memories/${memory.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      setProjectMemories((current) => current.map((item) => item.id === updated.id ? updated : item));
+      onToast(status === "active" ? "Project memory approved." : "Project memory deprecated.");
+    } catch (memoryError) {
+      setError(memoryError.message);
+    }
+  }
+
   async function submitAnswers(overrideMessage) {
     if (submittingRef.current || busy) return;
     const freeText = (overrideMessage ?? composer).trim();
-    const answerList = Object.entries(answers)
-      .filter(([, value]) => String(value).trim())
-      .map(([question_id, answer]) => ({ question_id, answer: String(answer).trim() }));
-    if (!freeText && !answerList.length) return;
+    if (!freeText) return;
     submittingRef.current = true;
     setBusy(true);
     setError("");
     setLiveThinking("");
-    setMessages((current) => [...current, { role: "user", content: freeText || answerList.map((item) => item.answer).join(", ") }]);
+    setMessages((current) => [...current, { role: "user", content: freeText }]);
     let thinking = "";
     try {
       let response;
       if (IS_GITHUB_PAGES) {
-        response = continueLocalGeneration(text, answers, freeText, sourceLabel);
+        response = continueLocalGeneration(text, {}, freeText, sourceLabel);
       } else {
         response = await streamGenerationRequest(`/api/generation/sessions/${sessionId}/chat/stream`, {
-          json: { message: freeText, answers: answerList },
+          json: { message: freeText, answers: [] },
           onThinking: (chunk) => { thinking = chunk; setLiveThinking(chunk); },
         });
       }
@@ -1899,18 +1960,6 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
       submittingRef.current = false;
     }
   }
-
-  // Once every pending question has an answer, continue automatically — no extra click needed.
-  useEffect(() => {
-    if (stage !== "chat" || busy || !questions.length || autoSubmitRef.current) return;
-    const allAnswered = questions.every((question) => String(answers[question.id] || "").trim());
-    if (!allAnswered) return;
-    const timer = setTimeout(() => {
-      autoSubmitRef.current = true;
-      submitAnswers();
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [answers, questions, busy, stage]);
 
   // Post-generation interaction: the author keeps chatting about the generated draft.
   async function continueDraft(text) {
@@ -1935,6 +1984,26 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
       handleTurn(response, sourceLabel, thinking);
     } catch (chatError) {
       setError(chatError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function askProjectSupervisor() {
+    if (busy || IS_GITHUB_PAGES) return;
+    const prompt = "Run a complete QA review of this requirement and draft. Identify ambiguity, missing coverage, duplicates, weak assertions, and relevant project conventions. Give prioritized, evidence-based suggestions without modifying cases.";
+    setMessages((current) => [...current, { role: "user", content: "Run a complete project QA review." }]);
+    setBusy(true);
+    setError("");
+    try {
+      const response = await apiRequest(`/api/projects/${encodeURIComponent(String(project.id))}/agent/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: prompt, generation_session_id: sessionId }),
+      });
+      setMessages((current) => [...current, { role: "agent", content: response.message }]);
+    } catch (reviewError) {
+      setError(reviewError.message);
     } finally {
       setBusy(false);
     }
@@ -1968,9 +2037,43 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
     reset();
   }
 
+  async function exportSelected() {
+    if (!selected.length || busy || IS_GITHUB_PAGES) return;
+    setBusy(true);
+    setError("");
+    try {
+      const apiKey = window.localStorage.getItem(API_KEY_STORAGE)?.trim();
+      const headers = { "Content-Type": "application/json" };
+      if (apiKey) headers["X-DeepSeek-API-Key"] = apiKey;
+      const response = await fetch(`${API_ORIGIN}/api/projects/${encodeURIComponent(String(project.id))}/export`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          filename: `${project.name}-generated-cases`,
+          cases: draft.cases.filter((_, index) => selected.includes(index)),
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || "The project template could not be exported.");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${project.name}-generated-cases.xlsx`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      onToast(`Exported ${selected.length} case${selected.length === 1 ? "" : "s"} with the learned project template.`);
+    } catch (exportError) {
+      setError(exportError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const allSelected = draft?.cases.length > 0 && selected.length === draft.cases.length;
-  const answeredCount = Object.values(answers).filter((value) => String(value).trim()).length;
-  const allAnswered = questions.length > 0 && questions.every((question) => String(answers[question.id] || "").trim());
+  const quickReplies = questions.flatMap((question) => (question.options || []).map((option) => ({ question, option })));
 
   // Shared workspace used both in the results view and the fullscreen review modal.
   const resultsWorkspace = draft ? (
@@ -2001,6 +2104,7 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
         </div>
         {error && <div className="gen-chat-error"><Warning size={15} /><span>{error}</span></div>}
         <div className="chat-suggestions">
+          {!IS_GITHUB_PAGES && <button onClick={askProjectSupervisor}>Run full QA review</button>}
           <button onClick={() => continueDraft("Explain case 1 — what does it verify and how?")}>Explain case 1</button>
           <button onClick={() => continueDraft("Add important edge cases that are missing from the suite")}>Add edge cases</button>
           <button onClick={() => continueDraft("Remove duplicate or redundant cases")}>Remove duplicates</button>
@@ -2015,46 +2119,59 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
 
   return (
     <>
-      <PageHeader eyebrow="AI authoring" title="Generate test cases" description="Paste your product requirements or upload a specification. The agent asks only for the details it needs, then drafts reviewable test cases you can edit before adding them to your inventory." />
-      {stage === "input" && <section className="generator-layout">
-        <div className="panel generator-upload-panel">
-          <div className="generator-intro"><span className="generator-orb"><Sparkle size={24} weight="duotone" /></span><div><span className="panel-kicker">Document to test suite</span><h2>Start with your requirements</h2><p>Requirements stay in a draft workflow so you can review coverage, steps and expected results first.</p></div></div>
-          <div className="gen-source-tabs">
-            <button className={inputMode === "text" ? "active" : ""} onClick={() => setInputMode("text")}><PencilSimple size={16} /> Paste requirements</button>
-            <button className={inputMode === "upload" ? "active" : ""} onClick={() => setInputMode("upload")}><UploadSimple size={16} /> Upload document</button>
-          </div>
-          {inputMode === "text" ? (
-            <div className="gen-text-area">
-              <textarea value={text} onChange={(event) => setText(event.target.value)} rows={9} disabled={busy}
-                placeholder={"Paste your product requirements here, for example:\nUsers can sign in with an email and password.\nThe password must be at least 8 characters.\nFailed attempts lock the account after 5 tries."} />
-              <div className="gen-text-actions"><span>{text.length.toLocaleString()} characters</span><button className="primary-button" disabled={busy || !text.trim()} onClick={startFromText}><Sparkle size={16} /> {busy ? "Analyzing…" : "Generate cases"}</button></div>
-            </div>
-          ) : (
-            <>
-              <button
-                className={`generator-dropzone ${dragging ? "dragging" : ""}`}
-                disabled={busy}
-                onClick={() => inputRef.current?.click()}
-                onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
-                onDragLeave={() => setDragging(false)}
-                onDrop={(event) => { event.preventDefault(); setDragging(false); upload(event.dataTransfer.files?.[0]); }}
-              >
-                <span><UploadSimple size={28} weight="duotone" /></span>
-                <strong>{busy ? `Analyzing ${sourceLabel}…` : "Drop a document here, or choose a file"}</strong>
-                <small>PDF, DOCX, Markdown or TXT · maximum readable content 45,000 characters</small>
-              </button>
-              <input ref={inputRef} type="file" accept=".pdf,.docx,.md,.txt" hidden onChange={(event) => upload(event.target.files?.[0])} />
-            </>
-          )}
-          {error && <div className="import-error generator-error"><Warning size={17} /><span>{error}</span></div>}
+      <PageHeader eyebrow="AI authoring" title="Generate test cases" description={`Generate in ${project.name} with project-scoped memory, approved examples and reusable templates.`} />
+      {stage === "input" && <section className="generator-chat-entry">
+        <div className="generator-chat-welcome">
+          <span className="generator-chat-mark"><Sparkle size={25} weight="duotone" /></span>
+          <h2>What would you like to test?</h2>
+          <p>Describe the feature, paste a requirement, or attach a document. I’ll ask for anything important that’s missing.</p>
         </div>
-        <aside className="panel generator-guidance">
-          <span className="panel-kicker">What happens</span>
-          <h2>Interactive coverage</h2>
-          <div><CheckCircle size={18} /><span><strong>Only what it needs</strong><small>Missing platform or priority? The agent asks instead of guessing.</small></span></div>
-          <div><CheckCircle size={18} /><span><strong>Editable table</strong><small>Generated cases open as a spreadsheet you can edit cell by cell.</small></span></div>
-          <div><CheckCircle size={18} /><span><strong>Source traceability</strong><small>Each draft retains its originating requirement and filename.</small></span></div>
-        </aside>
+        <div
+          className={`generator-chat-composer ${dragging ? "dragging" : ""}`}
+          onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(event) => { event.preventDefault(); setDragging(false); upload(event.dataTransfer.files?.[0]); }}
+        >
+          <textarea
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); startFromText(); } }}
+            rows={4}
+            disabled={busy}
+            autoFocus
+            placeholder="Describe a feature or paste your requirements…"
+            aria-label="Describe what you want to test"
+          />
+          <div className="generator-chat-toolbar">
+            <div className="generator-chat-tools">
+              <button type="button" disabled={busy} onClick={() => inputRef.current?.click()} title="Attach a requirement document"><UploadSimple size={17} /><span>Attach</span></button>
+              <button type="button" disabled={busy} onClick={() => learnInputRef.current?.click()} title="Learn from approved historical cases"><Database size={17} /><span>Learn cases</span></button>
+            </div>
+            <div className="generator-chat-send">
+              {text && <span>{text.length.toLocaleString()}</span>}
+              <button type="button" aria-label="Send requirements" disabled={busy || !text.trim()} onClick={startFromText}><PaperPlaneTilt size={18} weight="fill" /></button>
+            </div>
+          </div>
+          <input ref={inputRef} type="file" accept=".pdf,.docx,.md,.txt" hidden onChange={(event) => upload(event.target.files?.[0])} />
+          <input ref={learnInputRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={(event) => learnFromCases(event.target.files?.[0])} />
+        </div>
+        <div className="generator-chat-prompts" aria-label="Example prompts">
+          <button onClick={() => setText("Generate login test cases covering valid credentials, invalid passwords, account lockout, and session expiry.")}>Test a login flow</button>
+          <button onClick={() => setText("Create API test cases for creating, updating, and cancelling an order, including validation and permission errors.")}>Cover an API</button>
+          <button onClick={() => setText("Review this requirement for missing edge cases and then generate a complete regression suite.")}>Build a regression suite</button>
+        </div>
+        {busy && <div className="generator-chat-progress"><span className="loading-line" /><strong>{sourceLabel ? `Analyzing ${sourceLabel}…` : "Analyzing your requirements…"}</strong></div>}
+        {error && <div className="import-error generator-chat-error"><Warning size={17} /><span>{error}</span></div>}
+        {(learnedProfile || projectMemories.length > 0) && <div className="generator-context-summary">
+          {learnedProfile && <div className="generator-profile-ready"><CheckCircle size={17} /><span><strong>Project profile ready</strong> · {learnedProfile.style_profile?.sample_count || 0} approved examples · applied automatically</span></div>}
+          {!!projectMemories.length && <details className="generator-memory-details">
+            <summary><Database size={16} /><span>{projectMemories.length} project memor{projectMemories.length === 1 ? "y" : "ies"}</span><CaretDown size={14} /></summary>
+            <div className="project-memory-list">
+              {projectMemories.map((memory) => <div key={memory.id} className="inline-notice"><Database size={17} /><span><strong>{memory.memory_type}</strong> {memory.content}</span><div className="row-actions">{memory.status === "candidate" && <button className="text-button" onClick={() => setMemoryStatus(memory, "active")}>Approve</button>}{memory.status === "active" && <button className="text-button" onClick={() => setMemoryStatus(memory, "deprecated")}>Disable</button>}<StatusPill>{memory.status}</StatusPill></div></div>)}
+            </div>
+          </details>}
+        </div>}
+        <p className="generator-chat-footnote">QA Orbit can make mistakes. Review generated cases before adding them to your project.</p>
       </section>}
 
       {stage === "chat" && <section className="panel gen-chat-panel">
@@ -2065,30 +2182,16 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
         <div className="gen-chat-body">
           <div className="chat-messages">
             {messages.map((item, index) => <div className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div>{item.role === "agent" && item.reasoning ? <details className="gen-thinking"><summary>AI thinking process</summary><pre>{item.reasoning}</pre></details> : null}<p>{item.content}</p></div></div>)}
-            {questions.length > 0 && (
-              <div className="gen-question-card">
-                <div className="gen-question-heading"><span><Robot size={17} weight="duotone" /></span><div><strong>I need a few details</strong><small>Answer below or pick an option — it continues automatically once all are answered.</small></div></div>
-                {questions.map((question) => (
-                  <label className="gen-question" key={question.id}>
-                    <span>{question.question}</span>
-                    {question.options?.length ? (
-                      <div className="gen-option-group">{question.options.map((option) => (
-                        <label key={option} className={answers[question.id] === option ? "checked" : ""}><input type="radio" name={question.id} checked={answers[question.id] === option} onChange={() => setAnswers((current) => ({ ...current, [question.id]: option }))} /><span>{option}</span></label>
-                      ))}</div>
-                    ) : (
-                      <input value={answers[question.id] || ""} onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: event.target.value }))} placeholder="Type your answer…" />
-                    )}
-                  </label>
-                ))}
-                <div className="gen-question-actions"><span>{answeredCount} of {questions.length} answered</span>{allAnswered && !busy ? <span className="gen-auto-hint"><Pulse size={14} weight="fill" /> All answered — continuing automatically…</span> : <button className="secondary-button compact" disabled={busy} onClick={() => submitAnswers("Use your best judgment for the remaining details.")}>Skip — use best judgment</button>}</div>
-              </div>
-            )}
             {busy && <div className="chat-message agent"><span><Robot size={16} /></span><div>{liveThinking ? <details className="gen-thinking live" open><summary>AI is thinking…</summary><pre>{liveThinking}</pre></details> : <p>The agent is working…</p>}</div></div>}
           </div>
           {error && <div className="gen-chat-error"><Warning size={15} /><span>{error}</span></div>}
-          <div className="chat-composer">
-            <textarea value={composer} onChange={(event) => setComposer(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitAnswers(); } }} disabled={busy} placeholder="Or tell the agent anything else it should know…" />
-            <button className="primary-button" disabled={busy || (!composer.trim() && !answeredCount)} onClick={() => submitAnswers()}><PaperPlaneTilt size={17} weight="fill" /> {busy ? "Working…" : questions.length ? "Submit answers" : "Send"}</button>
+          {questions.length > 0 && <div className="gen-quick-replies">
+            {!!quickReplies.length && <div>{quickReplies.map(({ question, option }) => <button key={`${question.id}-${option}`} disabled={busy} onClick={() => setComposer((current) => [current.trim(), questions.length > 1 ? `${question.question}: ${option}` : option].filter(Boolean).join("\n"))}>{option}</button>)}</div>}
+            <button className="gen-skip-reply" disabled={busy} onClick={() => submitAnswers("Use your best judgment for the remaining details.")}>Use best judgment</button>
+          </div>}
+          <div className="chat-composer gen-main-composer">
+            <textarea value={composer} onChange={(event) => setComposer(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitAnswers(); } }} disabled={busy} autoFocus placeholder={questions.length ? "Reply to the agent…" : "Message the agent…"} aria-label="Reply to the agent" />
+            <button className="primary-button" aria-label="Send reply" disabled={busy || !composer.trim()} onClick={() => submitAnswers()}><PaperPlaneTilt size={17} weight="fill" /> {busy ? "Working…" : "Send"}</button>
           </div>
         </div>
       </section>}
@@ -2102,8 +2205,11 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
           <label><input type="checkbox" checked={allSelected} onChange={() => setSelected(allSelected ? [] : draft.cases.map((_, index) => index))} /><strong>{selected.length} of {draft.cases.length} selected</strong></label>
           <span>Edit any cell, or keep asking the agent to explain, change, add or remove cases — your edits are kept.</span>
         </div>
+        {!!draft.suggestions?.length && <div className="gen-agent-suggestions">
+          {draft.suggestions.map((suggestion) => <article key={suggestion.id} className={`inline-notice ${suggestion.severity === "critical" ? "danger" : ""}`}><Warning size={17} weight="fill" /><span><strong>{suggestion.title}</strong> {suggestion.detail}</span></article>)}
+        </div>}
         {resultsWorkspace}
-        <div className="generator-actions"><span><Info size={16} /> Only selected cases will be added.</span><button className="primary-button" disabled={!selected.length} onClick={addSelected}><Plus size={17} /> Add {selected.length} to Test cases</button></div>
+        <div className="generator-actions"><span><Info size={16} /> Only selected cases will be added or exported.</span><div className="row-actions">{learnedProfile?.template_profile && !IS_GITHUB_PAGES && <button className="secondary-button" disabled={!selected.length || busy} onClick={exportSelected}><UploadSimple size={17} /> Export template</button>}<button className="primary-button" disabled={!selected.length} onClick={addSelected}><Plus size={17} /> Add {selected.length} to Test cases</button></div></div>
       </section>}
 
       {reviewOpen && draft && (
@@ -2115,7 +2221,7 @@ function CaseGenerationPage({ cases, onAdd, onToast }) {
               <div className="review-header-actions"><span className="review-hint"><Info size={15} /> Edits and chat are shared with the page view.</span><button className="secondary-button" onClick={() => setReviewOpen(false)}><ArrowsIn size={16} /> Exit review</button></div>
             </div>
             {resultsWorkspace}
-            <div className="generator-actions review-actions"><span><Info size={16} /> Only selected cases will be added.</span><button className="primary-button" disabled={!selected.length} onClick={addSelected}><Plus size={17} /> Add {selected.length} to Test cases</button></div>
+            <div className="generator-actions review-actions"><span><Info size={16} /> Only selected cases will be added or exported.</span><div className="row-actions">{learnedProfile?.template_profile && !IS_GITHUB_PAGES && <button className="secondary-button" disabled={!selected.length || busy} onClick={exportSelected}><UploadSimple size={17} /> Export template</button>}<button className="primary-button" disabled={!selected.length} onClick={addSelected}><Plus size={17} /> Add {selected.length} to Test cases</button></div></div>
           </section>
         </div>
       )}
@@ -2200,7 +2306,7 @@ function CasesPage({ cases, setCases, dataSets, onRun, onToast }) {
                 <td><span className="data-binding-cell"><DataSetLabel dataSet={dataSets.find((item) => item.name === testCase.test_data)} name={testCase.test_data} /></span></td>
                 <td className="case-text-cell">{testCase.expected_result || "—"}</td>
                 <td><span className={`priority ${testCase.priority.toLowerCase()}`}>{testCase.priority}</span></td>
-                <td><div className="row-actions"><div className="action-menu-wrap"><IconButton label={`More actions for ${displayCaseId(testCase)}`} onClick={() => setMenuCaseId((current) => current === testCase.id ? null : testCase.id)}><DotsThree size={19} /></IconButton>{menuCaseId === testCase.id && <div className="action-menu"><button onClick={() => { setEditingCase(testCase); setMenuCaseId(null); }}><PencilSimple size={16} /> Edit case</button><button onClick={() => duplicateCase(testCase)}><Copy size={16} /> Duplicate case</button></div>}</div><button className="primary-button compact" onClick={() => onRun(caseDescription(testCase), "Test case")}><Play size={14} weight="fill" /> Run</button></div></td>
+                <td><div className="row-actions"><div className="action-menu-wrap"><IconButton label={`More actions for ${displayCaseId(testCase)}`} onClick={() => setMenuCaseId((current) => current === testCase.id ? null : testCase.id)}><DotsThree size={19} /></IconButton>{menuCaseId === testCase.id && <div className="action-menu"><button onClick={() => { setEditingCase(testCase); setMenuCaseId(null); }}><PencilSimple size={16} /> Edit case</button><button onClick={() => duplicateCase(testCase)}><Copy size={16} /> Duplicate case</button></div>}</div><button className="primary-button compact" onClick={() => onRun(testCase, "Test case")}><Play size={14} weight="fill" /> Run</button></div></td>
               </tr>
             ))}</tbody>
           </table>
@@ -2341,6 +2447,133 @@ function SecurityPage({ securityRules, onToast }) {
       </div>
 
       <div className="security-legend"><span><i className="legend-dot enabled" /> Built-in / enabled</span><span><i className="legend-dot warning" /> Configure to activate</span><span><i className="legend-dot neutral" /> Off or environment-dependent</span><strong><ShieldCheck size={17} /> Secure defaults + explicit policy = stronger protection</strong></div>
+    </>
+  );
+}
+
+function AgentKeysPage({ project, onToast }) {
+  const [keys, setKeys] = useState([]);
+  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [createdKey, setCreatedKey] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [revoking, setRevoking] = useState(null);
+
+  async function loadKeys() {
+    if (IS_GITHUB_PAGES) {
+      setError("API Key management requires the QA Orbit Server.");
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const result = await apiRequest(`/api/agent-keys?project_id=${encodeURIComponent(String(project.id))}`);
+      setKeys(result.agent_keys || []);
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { loadKeys(); }, [project.id]);
+
+  async function createKey(event) {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed || creating) return;
+    setCreating(true);
+    setError("");
+    try {
+      const result = await apiRequest("/api/agent-keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed, project_id: String(project.id) }),
+      });
+      setCreatedKey(result);
+      setName("");
+      setShowCreate(false);
+      await loadKeys();
+      onToast(`${result.name} API key created.`);
+    } catch (createError) {
+      setError(createError.message);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function copyCreatedKey() {
+    try {
+      await navigator.clipboard.writeText(createdKey.api_key);
+      onToast("Local Agent API key copied to the clipboard.");
+    } catch {
+      onToast("Copy was blocked. Select and copy the key manually.");
+    }
+  }
+
+  async function revokeKey() {
+    const target = revoking;
+    setRevoking(null);
+    if (!target) return;
+    try {
+      await apiRequest(`/api/agent-keys/${target.id}`, { method: "DELETE" });
+      await loadKeys();
+      onToast(`${target.name} was revoked and its Agent sessions were closed.`);
+    } catch (revokeError) {
+      setError(revokeError.message);
+    }
+  }
+
+  const activeKeys = keys.filter((key) => !key.revoked_at);
+  const deviceCount = keys.reduce((total, key) => total + Number(key.agent_count || 0), 0);
+  const latestUse = keys.map((key) => key.last_used_at).filter(Boolean).sort().at(-1);
+  const formatDate = (value) => value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Never";
+
+  return (
+    <>
+      <PageHeader eyebrow="Execution access" title="Local agents" description="Create and revoke enrollment keys used by desktop Agents to authenticate and claim Run Plans."
+        actions={<button className="primary-button" onClick={() => setShowCreate((open) => !open)}><Plus size={17} /> Create API key</button>} />
+
+      <div className="agent-key-metrics">
+        <article className="metric-card"><div className="metric-icon"><Key size={21} weight="duotone" /></div><div><span>Active API keys</span><strong>{activeKeys.length}</strong><small>{keys.length} total</small></div></article>
+        <article className="metric-card"><div className="metric-icon blue"><Robot size={21} weight="duotone" /></div><div><span>Enrolled devices</span><strong>{deviceCount}</strong><small>Across this project</small></div></article>
+        <article className="metric-card"><div className="metric-icon green"><Clock size={21} weight="duotone" /></div><div><span>Last Agent activity</span><strong className="metric-date">{latestUse ? formatDate(latestUse).split(",")[0] : "—"}</strong><small>{latestUse ? formatDate(latestUse).split(",").slice(1).join(",").trim() : "No device connected"}</small></div></article>
+      </div>
+
+      {showCreate && (
+        <section className="panel agent-key-create-panel">
+          <div className="agent-key-create-copy"><div className="local-agent-orb online"><Key size={20} weight="duotone" /></div><div><strong>Create an enrollment key</strong><span>Name the machine or deployment group that will use this key. The full secret is shown once.</span></div></div>
+          <form className="agent-key-create-form" onSubmit={createKey}>
+            <label><span>Key name</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. QA Lab Mac mini" maxLength="120" /></label>
+            <button type="button" className="secondary-button" onClick={() => setShowCreate(false)}>Cancel</button>
+            <button className="primary-button" disabled={!name.trim() || creating}>{creating ? "Creating…" : "Create key"}</button>
+          </form>
+        </section>
+      )}
+
+      {createdKey && (
+        <section className="agent-key-secret" role="status">
+          <div className="agent-key-secret-heading"><CheckCircle size={22} weight="fill" /><div><strong>Copy this API key now</strong><span>For security, QA Orbit will not display the full value again.</span></div><button className="icon-button" onClick={() => setCreatedKey(null)} aria-label="Hide API key"><X size={17} /></button></div>
+          <div className="agent-key-secret-value"><code>{createdKey.api_key}</code><button className="secondary-button" onClick={copyCreatedKey}><Copy size={16} /> Copy</button></div>
+          <small>Paste this value into the Local Agent Connection page with this Server URL: <code>{window.location.origin}</code></small>
+        </section>
+      )}
+
+      {error && <div className="agent-key-error"><Warning size={18} weight="fill" /><span>{error}</span><button className="text-button" onClick={loadKeys}>Retry</button></div>}
+
+      <section className="panel agent-key-list-panel">
+        <div className="panel-heading"><div><span className="panel-kicker">Project credentials</span><h2>Agent API keys</h2></div><StatusPill>{loading ? "Loading" : `${activeKeys.length} active`}</StatusPill></div>
+        {loading ? <div className="empty-state"><ArrowClockwise size={25} /><strong>Loading API keys…</strong></div> : keys.length ? (
+          <div className="table-wrap"><table className="data-table agent-key-table"><thead><tr><th>Name</th><th>Key prefix</th><th>Devices</th><th>Created</th><th>Last used</th><th>Status</th><th aria-label="Actions" /></tr></thead><tbody>
+            {keys.map((key) => <tr key={key.id}><td><strong className="cell-primary">{key.name}</strong><span className="cell-secondary">{key.id}</span></td><td><code>{key.key_prefix}••••••••</code></td><td>{key.agent_count || 0}</td><td>{formatDate(key.created_at)}</td><td>{formatDate(key.last_used_at)}</td><td><StatusPill>{key.revoked_at ? "Revoked" : "Active"}</StatusPill></td><td>{!key.revoked_at && <button className="danger-text-button" onClick={() => setRevoking(key)}>Revoke</button>}</td></tr>)}
+          </tbody></table></div>
+        ) : <div className="empty-state"><Key size={27} weight="duotone" /><strong>No Local Agent keys yet</strong><span>Create a key to connect the first desktop Agent to this project.</span></div>}
+      </section>
+
+      {revoking && <ConfirmModal title={`Revoke ${revoking.name}?`} detail="The key will stop working immediately and all Agent sessions created with it will be closed. This cannot be undone." confirmLabel="Revoke API key" onClose={() => setRevoking(null)} onConfirm={revokeKey} />}
     </>
   );
 }
@@ -2556,50 +2789,26 @@ function SettingsPage({ project, projects, projectMerges, setProjectMerges, onTo
 
 function RunModal({ target, type, applications, onClose, onStart }) {
   const isRerun = type === "Re-run";
-  const initialSettings = getLocalAgentSettings();
-  const [endpoint, setEndpoint] = useState(initialSettings.endpoint);
-  const [token, setToken] = useState(initialSettings.token);
-  const [agentState, setAgentState] = useState("checking");
+  const targetName = typeof target === "string" ? target : target.name || target.title || target.case_title || "Test run";
   const [agentError, setAgentError] = useState("");
-  const [advancedOpen, setAdvancedOpen] = useState(!initialSettings.token);
   const [submitting, setSubmitting] = useState(false);
   const [application, setApplication] = useState(applications[0]?.name || "");
   const [environment, setEnvironment] = useState("UAT");
   const [captureScreenshots, setCaptureScreenshots] = useState(true);
-  const [instructions, setInstructions] = useState(`Execute the QA Orbit test: ${target}. Verify the expected outcome and report any failure with clear evidence.`);
-
-  async function verifyAgent(settings = { endpoint, token }) {
-    saveLocalAgentSettings(settings);
-    setAgentState("checking");
-    setAgentError("");
-    try {
-      await checkLocalAgent();
-      setAgentState("ready");
-      setAdvancedOpen(false);
-    } catch (error) {
-      setAgentState("offline");
-      setAgentError(error.message);
-    }
-  }
-
-  useEffect(() => {
-    if (initialSettings.token) verifyAgent(initialSettings);
-    else setAgentState("unpaired");
-  }, []); // Pairing is checked once when the dialog opens.
+  const [instructions, setInstructions] = useState(`Execute the QA Orbit test: ${targetName}. Verify the expected outcome and report any failure with clear evidence.`);
 
   async function start() {
     setSubmitting(true);
     setAgentError("");
     try {
       await onStart({
-        title: `${type}: ${target}`,
-        prompt: `${instructions}\n\nApplication: ${application}\nEnvironment: ${environment}\nCapture screenshots on failure: ${captureScreenshots ? "yes" : "no"}`,
-        headless: false,
-        allowed_domains: [],
+        application,
+        environment,
+        instructions,
+        captureScreenshots,
       });
     } catch (error) {
       setAgentError(error.message);
-      setAgentState("offline");
       setSubmitting(false);
     }
   }
@@ -2609,18 +2818,17 @@ function RunModal({ target, type, applications, onClose, onStart }) {
       <button className="modal-backdrop" onClick={onClose} aria-label="Close run configuration" />
       <section className="modal-card run-modal">
         <div className="modal-header"><div><span className="eyebrow">{type}</span><h2>Configure execution</h2></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></div>
-        <div className="run-target"><div className="run-target-icon"><Play size={18} weight="fill" /></div><div><span>{type}</span><strong>{target}</strong></div></div>
+        <div className="run-target"><div className="run-target-icon"><Play size={18} weight="fill" /></div><div><span>{type}</span><strong>{targetName}</strong></div></div>
         {isRerun && <div className="inline-notice"><Info size={18} /><span>Uses the latest case and script with the original application, build, environment and test data snapshot.</span></div>}
         <div className="modal-form">
-          <div className={`agent-connection ${agentState}`}><span className="agent-connection-dot" /><div><strong>{agentState === "ready" ? "Local Agent ready" : agentState === "checking" ? "Checking Local Agent…" : agentState === "unpaired" ? "Pair Local Agent" : "Local Agent unavailable"}</strong><small>{agentState === "ready" ? "Runs in a dedicated browser profile on this device." : agentError || "Open the desktop app and copy its pairing token."}</small></div><button type="button" onClick={() => setAdvancedOpen((open) => !open)}>{advancedOpen ? "Hide" : "Configure"}</button></div>
-          {advancedOpen && <div className="agent-pairing"><label><span>Agent endpoint</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="http://127.0.0.1:8765" /></label><label><span>Pairing token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste from QA Orbit Agent" /></label><button type="button" className="secondary-button compact" onClick={() => verifyAgent()}>Save & verify</button></div>}
+          <div className="agent-connection ready"><span className="agent-connection-dot" /><div><strong>Execution Agent Server</strong><small>{agentError || "The server will create an immutable Run Plan and assign it to an authenticated Local Agent."}</small></div><StatusPill tone="info">Server queue</StatusPill></div>
           <label><span>Application</span><select value={application} onChange={(event) => setApplication(event.target.value)} disabled={isRerun}>{applications.map((app) => <option key={app.id}>{app.name}</option>)}</select></label>
           <div className="form-row"><label><span>Version / build</span><select disabled={isRerun}><option>v8.12.0-rc3</option><option>v8.12.0-rc2</option></select></label><label><span>Environment</span><select value={environment} onChange={(event) => setEnvironment(event.target.value)} disabled={isRerun}><option>UAT</option><option>SIT</option><option>PROD-SIM</option></select></label></div>
           <label><span>Test data</span><select disabled={isRerun}><option>CLAIMS_HAPPY_PATH_V3 · Data point 01</option><option>OCR_MULTI_PAGE_INVOICES · Data point 02</option></select></label>
           <label><span>Agent instructions</span><textarea rows="4" value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label>
           <label className="checkbox-row"><input type="checkbox" checked={captureScreenshots} onChange={(event) => setCaptureScreenshots(event.target.checked)} /><span>Capture screenshots on failure</span></label>
         </div>
-        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={agentState !== "ready" || submitting || !instructions.trim()} onClick={start}><Play size={16} weight="fill" /> {submitting ? "Sending…" : "Start on Local Agent"}</button></div>
+        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={submitting || !instructions.trim()} onClick={start}><Play size={16} weight="fill" /> {submitting ? "Creating Run Plan…" : "Create Run Plan"}</button></div>
       </section>
     </div>
   );
@@ -2710,9 +2918,10 @@ export function App() {
     plans: <PlansPage plans={data.plans} sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} planSets={data.planSets} planCases={data.planCases} planCaseExclusions={data.planCaseExclusions} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     sets: <SetsPage sets={data.sets} cases={caseRecords} setCaseMemberships={setCaseMemberships} setSetCaseMemberships={setSetCaseMemberships} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
     cases: <CasesPage cases={caseRecords} setCases={setCaseRecords} dataSets={data.dataSets} onRun={(target, type) => setRunModal({ target, type })} onToast={setToast} />,
-    generate: <CaseGenerationPage cases={caseRecords} onAdd={(generated) => { setCaseRecords((current) => [...current, ...generated]); setPage("cases"); }} onToast={setToast} />,
+    generate: <CaseGenerationPage key={currentProject.id} project={currentProject} cases={caseRecords} onAdd={(generated) => { setCaseRecords((current) => [...current, ...generated]); setPage("cases"); }} onToast={setToast} />,
     data: <DataPage dataSets={data.dataSets} cases={caseRecords} setCases={setCaseRecords} onToast={setToast} />,
     apps: <AppsPage applications={data.applications} onToast={setToast} />,
+    agents: <AgentKeysPage key={currentProject.id} project={currentProject} onToast={setToast} />,
     security: <SecurityPage securityRules={data.securityRules} onToast={setToast} />,
     settings: <SettingsPage key={currentProject.id} project={currentProject} projects={data.projects} projectMerges={projectMerges} setProjectMerges={setProjectMerges} onToast={setToast} />,
   }[page];
@@ -2724,7 +2933,23 @@ export function App() {
         <Topbar projects={data.projects} projectMerges={projectMerges} selectedSr={selectedSr} onSelectSr={handleSelectSr} archivedVisible={archivedVisible} setArchivedVisible={setArchivedVisible} />
         <main className="page-content">{pageContent}</main>
       </div>
-      {runModal && <RunModal target={runModal.target} type={runModal.type} applications={data.applications} onClose={() => setRunModal(null)} onStart={async (run) => { const result = await submitLocalRun(run); setRunModal(null); setToast(`Local run ${result.task.id.slice(0, 8)} queued on this device.`); setPage("runs"); }} />}
+      {runModal && <RunModal target={runModal.target} type={runModal.type} applications={data.applications} onClose={() => setRunModal(null)} onStart={async (run) => {
+        const result = await createServerRun({
+          target: runTargetPayload(runModal.target, runModal.type),
+          application: run.application,
+          environment: run.environment,
+          build: "v8.12.0-rc3",
+          instructions: run.instructions,
+          capture_screenshots: run.captureScreenshots,
+          headless: false,
+          max_steps: 50,
+          allowed_domains: [],
+          execution_target: "local_agent",
+        });
+        setRunModal(null);
+        setToast(`Run Plan ${result.run_plan.id.slice(0, 11)} queued on the server.`);
+        setPage("runs");
+      }} />}
       {toast && <div className="toast"><CheckCircle size={19} weight="fill" /><span>{toast}</span><button onClick={() => setToast("")} aria-label="Dismiss"><X size={16} /></button></div>}
     </div>
   );
