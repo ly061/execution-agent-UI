@@ -185,6 +185,8 @@ async def create_generation_session(
         if file is not None and file.filename:
             source = file.filename
             requirements = extract_document_text(source, await file.read())
+            if text and text.strip():
+                requirements = f"{requirements}\n\nAdditional author instructions:\n{text.strip()}"
         else:
             source = "Pasted requirements"
             requirements = text or ""
@@ -211,6 +213,8 @@ async def create_generation_session_stream(
         if file is not None and file.filename:
             source = file.filename
             requirements = extract_document_text(source, await file.read())
+            if text and text.strip():
+                requirements = f"{requirements}\n\nAdditional author instructions:\n{text.strip()}"
         else:
             source = "Pasted requirements"
             requirements = text or ""

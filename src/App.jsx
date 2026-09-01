@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createApp, reactive } from "vue";
 import initSqlJs from "sql.js";
 import * as XLSX from "xlsx";
 import {
@@ -70,6 +71,7 @@ import {
   YAxis,
 } from "recharts";
 import { createServerRun, listServerRunPlans } from "./serverRuns.js";
+import GenerationPrompt from "./vue-generation/GenerationPrompt.vue";
 
 const NAV = [
   {
@@ -244,9 +246,15 @@ function Sidebar({ page, setPage, collapsed, setCollapsed }) {
               <button
                 key={item.id}
                 className={active ? "active" : ""}
+                aria-label={collapsed ? item.label : undefined}
+                onPointerEnter={() => {
+                  if (collapsed) setActiveSection(item.id);
+                }}
+                onFocus={() => {
+                  if (collapsed) setActiveSection(item.id);
+                }}
                 onClick={() => {
                   setActiveSection(item.id);
-                  if (collapsed) setCollapsed(false);
                 }}
                 title={collapsed ? item.label : undefined}
               >
@@ -256,28 +264,30 @@ function Sidebar({ page, setPage, collapsed, setCollapsed }) {
             );
           })}
         </div>
-        {!collapsed && (
-          <div className="nav-pane nav-pane-secondary">
-            <div className="nav-pane-heading">{section.label}</div>
-            {section.children.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  key={item.id}
-                  className={page === item.id ? "active" : ""}
-                  onClick={() => setPage(item.id)}
-                  title={item.label}
-                >
-                  <Icon size={20} weight={page === item.id ? "fill" : "regular"} />
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
+        <div className="nav-pane nav-pane-secondary">
+          <div className="nav-pane-heading">{section.label}</div>
+          {section.children.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                className={page === item.id ? "active" : ""}
+                onClick={() => setPage(item.id)}
+                title={item.label}
+              >
+                <Icon size={20} weight={page === item.id ? "fill" : "regular"} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
       </nav>
       <div className="side-footer">
-        <button onClick={() => setCollapsed(!collapsed)} title="Collapse navigation">
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          title={collapsed ? "Expand navigation" : "Collapse navigation"}
+          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+        >
           <SidebarSimple size={20} />
           {!collapsed && <span>Collapse</span>}
         </button>
@@ -1957,9 +1967,32 @@ async function streamGenerationRequest(path, { form, json, onThinking }) {
   return result;
 }
 
+function VueGenerationPrompt({ busy, error, onSubmit, onLearn }) {
+  const hostRef = useRef(null);
+  const bridgeRef = useRef(null);
+  const callbacksRef = useRef({ onSubmit, onLearn });
+  callbacksRef.current = { onSubmit, onLearn };
+
+  useEffect(() => {
+    const bridge = reactive({ busy, error });
+    bridgeRef.current = bridge;
+    const app = createApp(GenerationPrompt, {
+      bridge,
+      onSubmit: (payload) => callbacksRef.current.onSubmit(payload),
+      onLearn: (file) => callbacksRef.current.onLearn(file),
+    });
+    app.mount(hostRef.current);
+    return () => { app.unmount(); bridgeRef.current = null; };
+  }, []);
+
+  useEffect(() => {
+    if (bridgeRef.current) Object.assign(bridgeRef.current, { busy, error });
+  }, [busy, error]);
+
+  return <div className="vue-generation-host" ref={hostRef} />;
+}
+
 function CaseGenerationPage({ cases, project, onAdd, onToast }) {
-  const inputRef = useRef(null);
-  const learnInputRef = useRef(null);
   const [stage, setStage] = useState("input");
   const [text, setText] = useState("");
   const [sourceLabel, setSourceLabel] = useState("");
@@ -1971,8 +2004,6 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
   const [selected, setSelected] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [dragging, setDragging] = useState(false);
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [liveThinking, setLiveThinking] = useState("");
   const [reviewOpen, setReviewOpen] = useState(false);
   const [messagePreviewOpen, setMessagePreviewOpen] = useState(false);
@@ -2014,7 +2045,6 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
     setBusy(false);
     setError("");
     setLiveThinking("");
-    setAttachmentMenuOpen(false);
     setReviewOpen(false);
     submittingRef.current = false;
     clarifyRoundsRef.current = 0;
@@ -2060,8 +2090,8 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
     setStage("results");
   }
 
-  async function startFromText() {
-    const content = text.trim();
+  async function startFromText(overrideText) {
+    const content = (overrideText ?? text).trim();
     if (!content || busy) return;
     setBusy(true);
     setError("");
@@ -2085,7 +2115,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
     }
   }
 
-  async function upload(file) {
+  async function upload(file, supplementalText = "") {
     if (!file) return;
     setSourceLabel(file.name);
     setBusy(true);
@@ -2096,12 +2126,14 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
       let response;
       if (IS_GITHUB_PAGES) {
         if (!/\.(txt|md)$/i.test(file.name)) throw new Error("PDF and Word generation requires the API service. Upload .txt or .md on this static preview.");
-        const content = await file.text();
+        const fileContent = await file.text();
+        const content = [fileContent, supplementalText].filter(Boolean).join("\n\nAdditional author instructions:\n");
         setText(content); // keep the source text so follow-up questions can generate from it
         response = startLocalGeneration(content, file.name);
       } else {
         const form = new FormData();
         form.append("file", file);
+        if (supplementalText) form.append("text", supplementalText);
         form.append("project_id", String(project.id));
         response = await streamGenerationRequest("/api/generation/sessions/stream", { form, onThinking: (chunk) => { thinking = chunk; setLiveThinking(chunk); } });
       }
@@ -2135,7 +2167,6 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
       setError(learnError.message);
     } finally {
       setBusy(false);
-      if (learnInputRef.current) learnInputRef.current.value = "";
     }
   }
 
@@ -2341,53 +2372,17 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
   return (
     <>
       <PageHeader eyebrow="AI authoring" title="Generate test cases" description={`Generate in ${project.name} with project-scoped memory, approved examples and reusable templates.`} actions={<button className="secondary-button" onClick={() => setMessagePreviewOpen(true)}><Rows size={17} /> Preview Agent messages</button>} />
-      {stage === "input" && <section className="generator-chat-entry">
-        <div className="generator-chat-welcome">
-          <span className="generator-chat-mark"><Sparkle size={25} weight="duotone" /></span>
-          <h2>What would you like to test?</h2>
-          <p>Describe the feature, paste a requirement, or attach a document. I’ll ask for anything important that’s missing.</p>
-        </div>
-        <div
-          className={`generator-chat-composer ${dragging ? "dragging" : ""}`}
-          onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(event) => { event.preventDefault(); setDragging(false); upload(event.dataTransfer.files?.[0]); }}
-        >
-          <textarea
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); startFromText(); } }}
-            rows={4}
-            disabled={busy}
-            autoFocus
-            placeholder="Describe a feature or paste your requirements…"
-            aria-label="Describe what you want to test"
-          />
-          <div className="generator-chat-toolbar">
-            <div className="generator-chat-tools">
-              <div className="generator-attachment-menu">
-                <button type="button" disabled={busy} aria-haspopup="menu" aria-expanded={attachmentMenuOpen} onClick={() => setAttachmentMenuOpen((open) => !open)} title="Add a file"><UploadSimple size={17} /><span>Attach</span><CaretDown size={13} /></button>
-                {attachmentMenuOpen && <div className="generator-attachment-popover" role="menu" aria-label="Attachment options">
-                  <button type="button" role="menuitem" onClick={() => { setAttachmentMenuOpen(false); inputRef.current?.click(); }}><span><FileText size={18} weight="duotone" /></span><div><strong>Upload requirement</strong><small>PDF, DOCX, Markdown or TXT</small></div></button>
-                  <button type="button" role="menuitem" onClick={() => { setAttachmentMenuOpen(false); learnInputRef.current?.click(); }}><span><Database size={18} weight="duotone" /></span><div><strong>Learn cases</strong><small>Learn style from approved XLSX, XLS or CSV</small></div></button>
-                </div>}
-              </div>
-            </div>
-            <div className="generator-chat-send">
-              {text && <span>{text.length.toLocaleString()}</span>}
-              <button type="button" aria-label="Send requirements" disabled={busy || !text.trim()} onClick={startFromText}><PaperPlaneTilt size={18} weight="fill" /></button>
-            </div>
-          </div>
-          <input ref={inputRef} type="file" accept=".pdf,.docx,.md,.txt" hidden onChange={(event) => { setAttachmentMenuOpen(false); upload(event.target.files?.[0]); }} />
-          <input ref={learnInputRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={(event) => { setAttachmentMenuOpen(false); learnFromCases(event.target.files?.[0]); }} />
-        </div>
-        <div className="generator-chat-prompts" aria-label="Example prompts">
-          <button onClick={() => setText("Generate login test cases covering valid credentials, invalid passwords, account lockout, and session expiry.")}>Test a login flow</button>
-          <button onClick={() => setText("Create API test cases for creating, updating, and cancelling an order, including validation and permission errors.")}>Cover an API</button>
-          <button onClick={() => setText("Review this requirement for missing edge cases and then generate a complete regression suite.")}>Build a regression suite</button>
-        </div>
-        {busy && <div className="generator-chat-progress"><span className="loading-line" /><strong>{sourceLabel ? `Analyzing ${sourceLabel}…` : "Analyzing your requirements…"}</strong></div>}
-        {error && <div className="import-error generator-chat-error"><Warning size={17} /><span>{error}</span></div>}
+      {stage === "input" && <section className="generator-vue-stage">
+        <VueGenerationPrompt
+          busy={busy}
+          error={error}
+          onSubmit={({ text: prompt, file }) => {
+            setText(prompt);
+            if (file) upload(file, prompt);
+            else startFromText(prompt);
+          }}
+          onLearn={learnFromCases}
+        />
         {(learnedProfile || projectMemories.length > 0) && <div className="generator-context-summary">
           {learnedProfile && <div className="generator-profile-ready"><CheckCircle size={17} /><span><strong>Project profile ready</strong> · {learnedProfile.style_profile?.sample_count || 0} approved examples · applied automatically</span></div>}
           {!!projectMemories.length && <details className="generator-memory-details">
@@ -2397,7 +2392,6 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
             </div>
           </details>}
         </div>}
-        <p className="generator-chat-footnote">QA Orbit can make mistakes. Review generated cases before adding them to your project.</p>
       </section>}
 
       {stage === "chat" && <section className="panel gen-chat-panel">

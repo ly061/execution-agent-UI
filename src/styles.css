@@ -88,8 +88,36 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .sidebar.collapsed .side-nav button, .sidebar.collapsed .side-footer > button { justify-content: center; padding-inline: 0; }
 .sidebar.collapsed .nav-pane-primary { width: 100%; }
 .sidebar.collapsed .nav-pane-primary button { height: 42px; }
-.sidebar.collapsed .nav-pane-secondary { display: none; }
 .sidebar.collapsed .avatar-row { justify-content: center; padding-inline: 0; }
+
+@media (min-width: 861px) {
+  .sidebar.collapsed { overflow: visible; }
+  .sidebar.collapsed .nav-pane-secondary {
+    position: absolute;
+    top: 98px;
+    left: 100%;
+    width: 224px;
+    max-height: calc(100vh - 116px);
+    padding: 14px 12px;
+    border: 1px solid #e7e9ef;
+    border-radius: 0 12px 12px 0;
+    background: #fff;
+    box-shadow: 12px 12px 30px rgba(26, 36, 58, .14);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateX(-6px);
+    transition: opacity .16s ease, transform .16s ease, visibility .16s ease;
+  }
+  .sidebar.collapsed .nav-pane-secondary button { justify-content: flex-start; padding-inline: 12px; }
+  .sidebar.collapsed .side-nav:hover .nav-pane-secondary,
+  .sidebar.collapsed .side-nav:focus-within .nav-pane-secondary {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateX(0);
+  }
+}
 
 .workspace { min-width: 0; }
 .topbar {
@@ -732,6 +760,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .generator-actions > span { display: flex; align-items: center; gap: 6px; color: #7d8795; font-size: 10px; }
 
 /* Generate cases — conversation-first entry */
+.generator-vue-stage, .vue-generation-host { width: min(820px, 100%); margin-inline: auto; }
 .generator-chat-entry { width: min(820px, 100%); min-height: calc(100vh - 280px); margin: 0 auto; padding: clamp(42px, 8vh, 92px) 0 28px; display: flex; flex-direction: column; align-items: center; }
 .generator-chat-welcome { width: min(660px, 100%); margin-bottom: 30px; text-align: center; }
 .generator-chat-mark { width: 52px; height: 52px; margin: 0 auto 17px; display: grid; place-items: center; border: 1px solid #f2c8d4; border-radius: 15px; color: var(--pink); background: #fff; box-shadow: 0 8px 26px rgba(211,17,69,.1); }
