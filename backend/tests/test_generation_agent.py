@@ -191,6 +191,14 @@ def test_parse_decision_keeps_a_valid_complex_requirement_flowchart():
     assert decision.flowchart.nodes[-1].next == ["review"]  # unknown node references are removed
 
 
+def test_quality_review_adds_a_flowchart_when_the_model_omits_one():
+    decision = generation_agent._parse_decision(GENERATE_DECISION)
+    reviewed = generation_agent._with_quality_review(decision, "Users sign in with valid credentials.", {})
+    assert reviewed.flowchart is not None
+    assert reviewed.flowchart.nodes[0].kind == "start"
+    assert reviewed.flowchart.nodes[-1].kind == "end"
+
+
 def _generated_session(monkeypatch) -> str:
     """Create a session and answer its questions until the suite is generated."""
 
@@ -275,6 +283,8 @@ def test_post_generation_chat_updates_cases(monkeypatch):
     body = response.json()
     assert body["action"] == "update"
     assert body["status"] == "working"
+    assert body["requires_approval"] is True
+    assert body["approval_title"] == "Apply proposed draft changes"
     assert len(body["cases"]) == 1
     assert "locks" in body["cases"][0]["title"].lower()
     # The updated draft is persisted so a resume returns it.
@@ -333,6 +343,7 @@ def test_deterministic_delete_chinese_does_not_call_model(monkeypatch):
     body = response.json()
     assert body["action"] == "update"
     assert body["status"] == "working"
+    assert body["requires_approval"] is True
     assert len(body["cases"]) == 0  # the only case was removed
     assert "Removed case 1" in body["message"]
     assert not calls  # executed deterministically, the model was never consulted

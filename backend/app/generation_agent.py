@@ -53,10 +53,9 @@ SYSTEM_PROMPT = (
     "supported failure handling. Every case needs title, case_type, priority, preconditions, numbered newline-separated "
     "test_steps, expected_result and a short requirement label. Never invent product behavior or credentials. "
     "summary is one sentence describing the suite.\n"
-    '- For a complex requirement with multiple roles, states, integrations, or conditional outcomes, include a concise '
-    'flowchart with 4-8 nodes so the author can verify the understood workflow. Use decision nodes for genuine branches; '
-    'each next value must reference another node id. Return flowchart as null for simple requirements. The flowchart may '
-    'accompany either ask or generate, but must only describe behavior supported by the requirements.\n'
+    '- Always include a concise flowchart with 3-8 nodes so the author can verify the understood workflow. Use decision '
+    'nodes for genuine branches; each next value must reference another node id. For simple requirements, use a short '
+    'linear flow. The flowchart may accompany either ask or generate, but must only describe behavior supported by the requirements.\n'
 )
 
 POST_GENERATION_PROMPT = (
@@ -73,7 +72,7 @@ POST_GENERATION_PROMPT = (
     '- When action is "reply": answer with message only (explanations, analysis, or a short reply). Do not include cases.\n'
     '- When action is "update": return only the minimum operations needed. Resolve a numbered reference against '
     "current_cases, then copy its exact case_id into the operation. Never return a complete rewritten suite. "
-    "The server applies and validates operations, so untouched cases remain byte-for-byte unchanged. Keep case_type "
+    "The server validates operations, and the author must approve the proposal before it is applied, so untouched cases remain byte-for-byte unchanged. Keep case_type "
     "to Web/API/Mobile, priority to P0/P1/P2, and numbered newline-separated test_steps. Never invent credentials.\n"
 )
 
@@ -127,6 +126,29 @@ def _coerce_flowchart(raw_flowchart: Any) -> GenerationFlowchart | None:
         node.next = [str(item) for item in raw_next if str(item) in valid_ids and str(item) != node.id][:3]
     title = str(raw_flowchart.get("title") or "Requirement flow").strip()[:120]
     return GenerationFlowchart(title=title or "Requirement flow", nodes=nodes)
+
+
+def _fallback_flowchart(requirements_text: str) -> GenerationFlowchart:
+    """Keep the requirement understanding visible even if the model omits a diagram."""
+    clauses = [
+        re.sub(r"^[-*#\d.()、\s]+", "", clause).strip()
+        for clause in re.split(r"\n+|(?<=[.!?。！？])\s*", requirements_text)
+    ]
+    clauses = [clause[:160] for clause in clauses if len(clause) >= 8][:3]
+    if not clauses:
+        clauses = ["Review the stated requirement", "Perform the documented user action"]
+    nodes = [GenerationFlowNode(id="start", label="Start the described workflow", kind="start", next=["step-1"])]
+    nodes.extend(
+        GenerationFlowNode(
+            id=f"step-{index}",
+            label=clause,
+            kind="step",
+            next=[f"step-{index + 1}"] if index < len(clauses) else ["end"],
+        )
+        for index, clause in enumerate(clauses, start=1)
+    )
+    nodes.append(GenerationFlowNode(id="end", label="Verify the stated outcome", kind="end"))
+    return GenerationFlowchart(title="Requirement flow", nodes=nodes)
 
 
 def _coerce_case(item: Any) -> dict[str, str] | None:
@@ -495,6 +517,9 @@ def _state_from_decision(decision: GenerationDecision) -> dict[str, Any]:
         "operations": [operation.model_dump() for operation in decision.operations],
         "suggestions": [suggestion.model_dump() for suggestion in decision.suggestions],
         "flowchart": decision.flowchart.model_dump() if decision.flowchart else None,
+        "requires_approval": decision.action == "update",
+        "approval_title": "Apply proposed draft changes" if decision.action == "update" else "",
+        "approval_description": decision.message if decision.action == "update" else "",
     }
 
 
@@ -520,6 +545,9 @@ def _to_turn(session_id: str, decision: GenerationDecision) -> GenerationTurnRes
             operations=decision.operations,
             suggestions=decision.suggestions,
             flowchart=decision.flowchart,
+            requires_approval=True,
+            approval_title="Apply proposed draft changes",
+            approval_description=decision.message,
         )
     return GenerationTurnResponse(
         session_id=session_id,
@@ -539,6 +567,8 @@ def _with_quality_review(
     requirements_text: str,
     memory_context: dict[str, Any],
 ) -> GenerationDecision:
+    if decision.action in {"ask", "generate"} and decision.flowchart is None:
+        decision.flowchart = _fallback_flowchart(requirements_text)
     if decision.action in {"generate", "update"}:
         decision.suggestions = project_memory.quality_suggestions(
             requirements_text, decision.cases, memory_context
@@ -669,6 +699,9 @@ def session_state(session_id: str) -> GenerationTurnResponse | None:
         operations=state.get("operations") or [],
         suggestions=state.get("suggestions") or [],
         flowchart=GenerationFlowchart.model_validate(state["flowchart"]) if state.get("flowchart") else None,
+        requires_approval=bool(state.get("requires_approval", False)),
+        approval_title=str(state.get("approval_title") or ""),
+        approval_description=str(state.get("approval_description") or ""),
     )
 
 

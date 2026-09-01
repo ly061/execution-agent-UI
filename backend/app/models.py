@@ -206,6 +206,11 @@ class GenerationTurnResponse(BaseModel):
     operations: list[CasePatchOperation] = Field(default_factory=list)
     suggestions: list[AgentSuggestion] = Field(default_factory=list)
     flowchart: GenerationFlowchart | None = None
+    # Draft-changing turns are proposals. The client must obtain an explicit
+    # author decision before replacing the currently reviewed draft.
+    requires_approval: bool = False
+    approval_title: str = ""
+    approval_description: str = ""
 
 
 class GenerationAnswer(BaseModel):

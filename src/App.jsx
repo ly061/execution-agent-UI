@@ -72,6 +72,7 @@ import {
 } from "recharts";
 import { createServerRun, listServerRunPlans } from "./serverRuns.js";
 import GenerationPrompt from "./vue-generation/GenerationPrompt.vue";
+import HumanApproval from "./vue-generation/HumanApproval.vue";
 
 const NAV = [
   {
@@ -1609,8 +1610,8 @@ function buildLocalCases(text, answers, sourceLabel) {
 function buildLocalFlowchart(text) {
   const clauses = String(text).split(/\n+|(?<=[.!?。！？])\s+/).map((item) => item.replace(/^[-*#\d.()、\s]+/, "").trim()).filter((item) => item.length >= 12);
   const branching = /\b(if|when|unless|otherwise|either|role|status|state|approve|reject)\b|如果|当|否则|角色|状态|审批|拒绝/i.test(text);
-  if (clauses.length < 3 && String(text).length < 360 && !branching) return null;
-  const primary = clauses.slice(0, 3).map((item) => item.length > 66 ? `${item.slice(0, 63)}…` : item);
+  const primary = (clauses.length ? clauses : ["Review the stated requirement", "Perform the described action"])
+    .slice(0, 3).map((item) => item.length > 66 ? `${item.slice(0, 63)}…` : item);
   const nodes = [
     { id: "start", label: "User starts the workflow", kind: "start", next: ["step-1"] },
     ...primary.map((label, index) => ({ id: `step-${index + 1}`, label, kind: branching && index === 1 ? "decision" : "step", next: index < primary.length - 1 ? [`step-${index + 2}`] : ["end"] })),
@@ -1992,6 +1993,25 @@ function VueGenerationPrompt({ busy, error, onSubmit, onLearn }) {
   return <div className="vue-generation-host" ref={hostRef} />;
 }
 
+function VueHumanApproval({ title, description, onApprove, onReject }) {
+  const hostRef = useRef(null);
+  const callbacksRef = useRef({ onApprove, onReject });
+  callbacksRef.current = { onApprove, onReject };
+
+  useEffect(() => {
+    const app = createApp(HumanApproval, {
+      title,
+      description,
+      onApprove: () => callbacksRef.current.onApprove(),
+      onReject: () => callbacksRef.current.onReject(),
+    });
+    app.mount(hostRef.current);
+    return () => app.unmount();
+  }, []);
+
+  return <div ref={hostRef} />;
+}
+
 function CaseGenerationPage({ cases, project, onAdd, onToast }) {
   const [stage, setStage] = useState("input");
   const [text, setText] = useState("");
@@ -2009,6 +2029,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
   const [messagePreviewOpen, setMessagePreviewOpen] = useState(false);
   const [learnedProfile, setLearnedProfile] = useState(null);
   const [projectMemories, setProjectMemories] = useState([]);
+  const [pendingApproval, setPendingApproval] = useState(null);
   const submittingRef = useRef(false);
   const clarifyRoundsRef = useRef(0);
 
@@ -2046,6 +2067,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
     setError("");
     setLiveThinking("");
     setReviewOpen(false);
+    setPendingApproval(null);
     submittingRef.current = false;
     clarifyRoundsRef.current = 0;
   }
@@ -2080,6 +2102,15 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
       return;
     }
     const nextCases = response?.cases || [];
+    if (action === "update" && response?.requires_approval) {
+      setPendingApproval({
+        cases: nextCases,
+        message: response.approval_description || response.message || "Review the proposed draft changes before applying them.",
+        title: response.approval_title || "Apply proposed draft changes",
+      });
+      setStage("results");
+      return;
+    }
     setDraft({ summary: response?.summary || draft?.summary || "", cases: nextCases, suggestions: response?.suggestions || [] });
     setSelected((current) => {
       const kept = current.filter((index) => index < nextCases.length);
@@ -2330,6 +2361,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
   // Shared workspace used both in the results view and the fullscreen review modal.
   const resultsWorkspace = draft ? (
     <div className="gen-results-workspace">
+      {pendingApproval && <VueHumanApproval title={pendingApproval.title} description={pendingApproval.message} onReject={() => { setPendingApproval(null); onToast("Proposed changes were discarded."); }} onApprove={() => { const nextCases = pendingApproval.cases; setDraft((current) => ({ ...current, cases: nextCases })); setSelected(nextCases.map((_, index) => index)); setPendingApproval(null); onToast("Approved changes applied to the draft."); }} />}
       <div className="case-preview-table gen-edit-table">
         <table>
           <thead><tr><th><input type="checkbox" checked={allSelected} onChange={() => setSelected(allSelected ? [] : draft.cases.map((_, index) => index))} aria-label="Select all generated cases" /></th><th>#</th><th>Title</th><th>Type</th><th>Priority</th><th>Preconditions</th><th>Test steps</th><th>Expected result</th><th>Requirement</th></tr></thead>
