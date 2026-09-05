@@ -2,6 +2,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.jsx";
 import "./styles.css";
+import "element-plus/dist/index.css";
+import "vue-element-plus-x/es/styles/index.css";
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>

@@ -9,7 +9,7 @@ import httpx
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from . import database, deep_orchestrator, generation_agent, project_memory
+from . import case_agent_v2, database, deep_orchestrator, generation_agent, project_memory
 from .agent import chat
 from .importer import build_preview
 from .llm import DEEPSEEK_MODEL, deepseek_enabled
@@ -34,6 +34,71 @@ app.add_middleware(
     allow_methods=["*"] ,
     allow_headers=["*"],
 )
+
+
+# Case Agent v2 — Auto/HITP orchestration, immutable artifacts and project profiles.
+@app.get("/api/projects/{project_id}/case-agent/profiles")
+def list_case_agent_profiles(project_id: str) -> dict[str, object]:
+    # Ensures every project has the required editable Default Profile.
+    if not database.list_case_agent_profiles(project_id):
+        case_agent_v2.create_profile(project_id, case_agent_v2.ProfileInput(name="Default Profile"))
+    return {"profiles": database.list_case_agent_profiles(project_id)}
+
+
+@app.post("/api/projects/{project_id}/case-agent/profiles", status_code=201)
+def create_case_agent_profile(project_id: str, request: case_agent_v2.ProfileInput, copy_from: str | None = None) -> dict[str, object]:
+    try:
+        return case_agent_v2.create_profile(project_id, request, copy_from=copy_from)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/projects/{project_id}/case-agent/runs", status_code=201)
+def start_case_agent_run(project_id: str, request: case_agent_v2.RunInput) -> dict[str, object]:
+    try:
+        return case_agent_v2.start_run(project_id, request)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/projects/{project_id}/case-agent/runs/{run_id}/continue")
+def continue_case_agent_run(project_id: str, run_id: str, request: case_agent_v2.ContinueInput) -> dict[str, object]:
+    run = database.get_case_agent_run(run_id)
+    if not run or run["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    try:
+        return case_agent_v2.continue_run(run_id, request)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/projects/{project_id}/case-agent/artifacts")
+def list_case_agent_artifacts(project_id: str, artifact_type: str | None = None) -> dict[str, object]:
+    return {"artifacts": database.list_case_agent_artifacts(project_id, artifact_type)}
+
+
+@app.get("/api/projects/{project_id}/case-agent/artifacts/{artifact_id}")
+def get_case_agent_artifact(project_id: str, artifact_id: str, revision: int | None = None) -> dict[str, object]:
+    artifact = database.get_case_agent_artifact(artifact_id, revision)
+    if not artifact or artifact["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return artifact
+
+
+@app.post("/api/projects/{project_id}/case-agent/artifacts/{artifact_id}/mutate")
+def mutate_case_agent_artifact(project_id: str, artifact_id: str, request: case_agent_v2.ArtifactMutation) -> dict[str, object]:
+    artifact = database.get_case_agent_artifact(artifact_id)
+    if not artifact or artifact["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    try:
+        return case_agent_v2.mutate_artifact(artifact_id, request)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/projects/{project_id}/case-agent/query")
+def query_case_agent(project_id: str, request: case_agent_v2.QueryInput) -> dict[str, object]:
+    return case_agent_v2.evidence_query(project_id, request)
 
 
 def require_agent(authorization: str | None = Header(default=None)) -> dict[str, object]:

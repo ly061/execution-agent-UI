@@ -73,6 +73,8 @@ import {
 import { createServerRun, listServerRunPlans } from "./serverRuns.js";
 import GenerationPrompt from "./vue-generation/GenerationPrompt.vue";
 import HumanApproval from "./vue-generation/HumanApproval.vue";
+import AgentChatList from "./vue-messages/AgentChatList.vue";
+import AgentMessagePreviewVue from "./vue-messages/AgentMessagePreview.vue";
 
 const NAV = [
   {
@@ -1645,174 +1647,6 @@ function continueLocalGeneration(text, answers, message, sourceLabel) {
   return buildLocalCases(text, { ...answers, platform: message, priority: message }, sourceLabel);
 }
 
-function RequirementFlow({ flowchart }) {
-  if (!flowchart?.nodes?.length) return null;
-  const edges = flowchart.edges?.length
-    ? flowchart.edges
-    : flowchart.nodes.flatMap((node) => (node.next || []).map((target) => ({ from: node.id, to: target })));
-  const kindLabel = { start: "Start", step: "Step", decision: "Decision", end: "Outcome" };
-  const levels = new Map();
-  const pending = [...flowchart.nodes];
-  flowchart.nodes.forEach((node) => {
-    if (Number.isInteger(node.stage)) levels.set(node.id, node.stage);
-  });
-  let passes = 0;
-  while (pending.length) {
-    const node = pending.shift();
-    if (levels.has(node.id)) continue;
-    const parents = edges.filter((edge) => edge.to === node.id).map((edge) => edge.from);
-    if (!parents.length) levels.set(node.id, 0);
-    else if (parents.every((id) => levels.has(id))) levels.set(node.id, Math.max(...parents.map((id) => levels.get(id))) + 1);
-    else if (passes > flowchart.nodes.length * flowchart.nodes.length) levels.set(node.id, 0);
-    else pending.push(node);
-    passes += 1;
-  }
-  const stageCount = Math.max(...levels.values()) + 1;
-  const stages = Array.from({ length: stageCount }, (_, stage) => flowchart.nodes.filter((node) => levels.get(node.id) === stage));
-  return <section className="gen-requirement-flow" aria-label={flowchart.title || "Requirement flow"}>
-    <header><FlowArrow size={16} weight="duotone" /><div><strong>{flowchart.title || "Requirement flow"}</strong><small>{flowchart.nodes.length} steps · {edges.length} paths</small></div></header>
-    <div className="gen-flow-track" style={{ "--flow-stages": stageCount }}>
-      {stages.map((stage, stageIndex) => <div className="gen-flow-stage-wrap" key={stageIndex}>
-        <div className="gen-flow-stage">
-          {stage.map((node) => <article className={`gen-flow-node ${node.kind || "step"}`} key={node.id}>
-          <div className="gen-flow-node-label"><i /><small>{kindLabel[node.kind] || "Step"}</small></div>
-          <p>{node.label}</p>
-          {edges.some((edge) => edge.from === node.id && edge.label) && <div className="gen-flow-edge-labels">{edges.filter((edge) => edge.from === node.id && edge.label).map((edge) => <span key={`${edge.to}-${edge.label}`}>{edge.label}</span>)}</div>}
-          </article>)}
-        </div>
-        {stageIndex < stages.length - 1 && <span className="gen-flow-connector" aria-hidden="true"><ArrowRight size={16} /></span>}
-      </div>)}
-    </div>
-  </section>;
-}
-
-function MarkdownMessage({ content }) {
-  const inline = (value) => String(value).split(/(\*\*.*?\*\*|`.*?`)/g).filter(Boolean).map((part, index) => {
-    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
-    if (part.startsWith("`") && part.endsWith("`")) return <code key={index}>{part.slice(1, -1)}</code>;
-    return <span key={index}>{part}</span>;
-  });
-  return <div className="agent-markdown">{String(content || "").split("\n").map((line, index) => {
-    if (/^###\s+/.test(line)) return <h4 key={index}>{inline(line.replace(/^###\s+/, ""))}</h4>;
-    if (/^##?\s+/.test(line)) return <h3 key={index}>{inline(line.replace(/^##?\s+/, ""))}</h3>;
-    if (/^[-*]\s+/.test(line)) return <div className="agent-markdown-list" key={index}><span>•</span><p>{inline(line.replace(/^[-*]\s+/, ""))}</p></div>;
-    return line ? <p key={index}>{inline(line)}</p> : <span className="agent-markdown-gap" key={index} />;
-  })}</div>;
-}
-
-function HitlMessage({ title, description, risk, onDecision }) {
-  const [comment, setComment] = useState("");
-  const [decision, setDecision] = useState("");
-  const decide = (next) => { setDecision(next); onDecision?.(next, comment); };
-  return <section className={`agent-hitl ${decision ? "decided" : ""}`}>
-    <header><span><ShieldCheck size={18} weight="duotone" /></span><div><small>Human approval required</small><strong>{title}</strong></div>{risk && <em>{risk}</em>}</header>
-    <p>{description}</p>
-    {decision ? <div className={`agent-decision ${decision}`}><CheckCircle size={16} weight="fill" /><span>{decision === "approved" ? "Approved" : "Rejected"}{comment ? ` · ${comment}` : ""}</span><button onClick={() => setDecision("")}>Change</button></div> : <>
-      <label><span>Comment (optional)</span><textarea rows="2" value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Add context for the agent…" /></label>
-      <div className="agent-card-actions"><button className="agent-reject" onClick={() => decide("rejected")}><X size={15} /> Reject</button><button className="agent-approve" onClick={() => decide("approved")}><Check size={15} /> Approve</button></div>
-    </>}
-  </section>;
-}
-
-function AgentActionMessage({ title, detail, actions = [] }) {
-  const [resolved, setResolved] = useState([]);
-  return <section className="agent-action-card">
-    <header><span><Sparkle size={17} weight="fill" /></span><div><small>Suggested actions</small><strong>{title}</strong></div></header>
-    {detail && <p>{detail}</p>}
-    <div className="agent-action-list">{actions.map((action, index) => <article key={`${action.label}-${index}`} className={resolved.includes(index) ? "resolved" : ""}><span><strong>{action.label}</strong><small>{action.description}</small></span>{resolved.includes(index) ? <em><Check size={13} /> Applied</em> : <button onClick={() => setResolved((current) => [...current, index])}>{action.cta || "Apply"}<ArrowRight size={13} /></button>}</article>)}</div>
-  </section>;
-}
-
-function AgentTableMessage({ title, columns = [], rows = [], onChange }) {
-  const [draftColumns, setDraftColumns] = useState(() => columns.map((column, index) => ({ ...column, key: column.key || `column_${index + 1}` })));
-  const [draftRows, setDraftRows] = useState(() => rows.map((row) => ({ ...row })));
-  const publish = (nextColumns, nextRows) => onChange?.({ columns: nextColumns, rows: nextRows });
-  const changeCell = (rowIndex, key, value) => {
-    const nextRows = draftRows.map((row, index) => index === rowIndex ? { ...row, [key]: value } : row);
-    setDraftRows(nextRows);
-    publish(draftColumns, nextRows);
-  };
-  const changeColumn = (columnIndex, label) => {
-    const nextColumns = draftColumns.map((column, index) => index === columnIndex ? { ...column, label } : column);
-    setDraftColumns(nextColumns);
-    publish(nextColumns, draftRows);
-  };
-  const addRow = () => {
-    const nextRows = [...draftRows, Object.fromEntries(draftColumns.map((column) => [column.key, ""]))];
-    setDraftRows(nextRows);
-    publish(draftColumns, nextRows);
-  };
-  const removeRow = (rowIndex) => {
-    const nextRows = draftRows.filter((_, index) => index !== rowIndex);
-    setDraftRows(nextRows);
-    publish(draftColumns, nextRows);
-  };
-  const addColumn = () => {
-    const key = `column_${crypto.randomUUID().slice(0, 8)}`;
-    const nextColumns = [...draftColumns, { key, label: `Column ${draftColumns.length + 1}` }];
-    const nextRows = draftRows.map((row) => ({ ...row, [key]: "" }));
-    setDraftColumns(nextColumns);
-    setDraftRows(nextRows);
-    publish(nextColumns, nextRows);
-  };
-  const pasteCells = (event, rowIndex, columnIndex) => {
-    const matrix = event.clipboardData.getData("text").replace(/\r/g, "").split("\n").filter((line, index, list) => line || index < list.length - 1).map((line) => line.split("\t"));
-    if (matrix.length === 1 && matrix[0].length === 1) return;
-    event.preventDefault();
-    const requiredRows = rowIndex + matrix.length;
-    const nextRows = Array.from({ length: Math.max(requiredRows, draftRows.length) }, (_, index) => ({ ...(draftRows[index] || Object.fromEntries(draftColumns.map((column) => [column.key, ""]))) }));
-    matrix.forEach((values, pastedRowIndex) => values.forEach((value, pastedColumnIndex) => {
-      const column = draftColumns[columnIndex + pastedColumnIndex];
-      if (column) nextRows[rowIndex + pastedRowIndex][column.key] = value;
-    }));
-    setDraftRows(nextRows);
-    publish(draftColumns, nextRows);
-  };
-  return <section className="agent-data-card editable"><header><Rows size={17} weight="duotone" /><div><strong>{title}</strong><small>{draftRows.length} rows · click any cell to edit</small></div><span className="agent-table-badge">Editable</span></header><div className="agent-data-table"><table><thead><tr><th className="agent-row-number">#</th>{draftColumns.map((column, columnIndex) => <th key={column.key}><input aria-label={`Column ${columnIndex + 1} name`} value={column.label} onChange={(event) => changeColumn(columnIndex, event.target.value)} /></th>)}<th className="agent-row-action" /></tr></thead><tbody>{draftRows.map((row, rowIndex) => <tr key={rowIndex}><th className="agent-row-number">{rowIndex + 1}</th>{draftColumns.map((column, columnIndex) => <td key={column.key}><input aria-label={`Row ${rowIndex + 1}, ${column.label}`} value={row[column.key] ?? ""} onChange={(event) => changeCell(rowIndex, column.key, event.target.value)} onPaste={(event) => pasteCells(event, rowIndex, columnIndex)} /></td>)}<td className="agent-row-action"><button aria-label={`Delete row ${rowIndex + 1}`} onClick={() => removeRow(rowIndex)}><Trash size={13} /></button></td></tr>)}</tbody></table></div><footer className="agent-table-actions"><button onClick={addRow}><Plus size={13} /> Add row</button><button onClick={addColumn}><Plus size={13} /> Add column</button><small>Paste rows and columns directly from Excel</small></footer></section>;
-}
-
-function AgentQAMessage({ title, items = [], onAnswer }) {
-  const [answers, setAnswers] = useState(() => items.map((item) => item.answer || ""));
-  const [submitted, setSubmitted] = useState(() => items.map((item) => Boolean(item.answer)));
-  const submit = (index) => {
-    if (!answers[index]?.trim()) return;
-    setSubmitted((current) => current.map((value, itemIndex) => itemIndex === index ? true : value));
-    onAnswer?.({ index, question: items[index].question, answer: answers[index].trim(), id: items[index].id });
-  };
-  const pending = submitted.filter((value) => !value).length;
-  return <section className="agent-qa-card"><header><Info size={17} weight="duotone" /><div><strong>{title}</strong><small>{pending ? `${pending} question${pending === 1 ? "" : "s"} waiting for your answer` : "All questions answered"}</small></div></header><div className="agent-qa-list">{items.map((item, index) => <article className={submitted[index] ? "answered" : ""} key={item.id || index}><div className="agent-question"><span>Q{index + 1}</span><div><small>Agent asks</small><strong>{item.question}</strong>{item.context && <p>{item.context}</p>}</div></div>{submitted[index] ? <div className="agent-user-answer"><span><UserCircle size={15} weight="duotone" /></span><div><small>Your answer</small><p>{answers[index]}</p></div><button onClick={() => setSubmitted((current) => current.map((value, itemIndex) => itemIndex === index ? false : value))}>Edit</button></div> : <div className="agent-answer-composer"><label htmlFor={`agent-answer-${index}`}>Your answer</label><textarea id={`agent-answer-${index}`} rows="3" value={answers[index]} onChange={(event) => setAnswers((current) => current.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} placeholder={item.placeholder || "Type your answer for the agent…"} /><button disabled={!answers[index]?.trim()} onClick={() => submit(index)}><PaperPlaneTilt size={14} weight="fill" /> Send answer</button></div>}</article>)}</div></section>;
-}
-
-function AgentMindMapMessage({ title, center, branches = [] }) {
-  const colors = ["#4f6fc7", "#d45578", "#168576", "#8a63c7", "#d17935", "#3683ad"];
-  const columns = Math.ceil(branches.length / 2);
-  return <section className="agent-visual-card"><header><GitBranch size={17} weight="duotone" /><div><strong>{title}</strong><small>Fishbone mind map</small></div></header><div className="agent-mindmap"><div className="agent-mindmap-center">{center}</div><div className="agent-mindmap-spine"><div className="agent-mindmap-branches">{branches.map((branch, index) => {
-    const column = Math.floor(index / 2);
-    return <article className={index % 2 ? "lower" : "upper"} key={`${branch.label}-${index}`} style={{ "--branch-color": colors[index % colors.length], "--branch-position": `${((column + .55) / columns) * 100}%` }}><div><strong>{branch.label}</strong>{branch.items.map((item) => <span key={item}>{item}</span>)}</div></article>;
-  })}</div></div></div></section>;
-}
-
-function AgentSwimlaneMessage({ title, lanes = [] }) {
-  const maxSteps = Math.max(0, ...lanes.map((lane) => lane.steps.length));
-  return <section className="agent-visual-card"><header><Rows size={17} weight="duotone" /><div><strong>{title}</strong><small>Swimlane</small></div></header><div className="agent-swimlane" style={{ "--lane-steps": maxSteps }}>{lanes.map((lane) => <div className="agent-swimlane-row" key={lane.name}><strong>{lane.name}</strong><div>{lane.steps.map((step, index) => <span key={index}>{step}{index < lane.steps.length - 1 && <ArrowRight size={12} />}</span>)}</div></div>)}</div></section>;
-}
-
-function AgentMessageBody({ message }) {
-  if (Array.isArray(message.blocks)) return <div className="agent-message-blocks">{message.blocks.map((block, index) => <AgentMessageBody key={`${block.type || "markdown"}-${index}`} message={block} />)}</div>;
-  const type = message.type || "markdown";
-  if (type === "hitl") return <HitlMessage {...message.data} />;
-  if (type === "actions") return <AgentActionMessage {...message.data} />;
-  if (type === "table") return <AgentTableMessage {...message.data} />;
-  if (type === "qa") return <AgentQAMessage {...message.data} />;
-  if (type === "mindmap") return <AgentMindMapMessage {...message.data} />;
-  if (type === "swimlane") return <AgentSwimlaneMessage {...message.data} />;
-  if (type === "flowchart") return <RequirementFlow flowchart={message.data} />;
-  return <MarkdownMessage content={message.content} />;
-}
-
-function AgentChatMessage({ item }) {
-  return <div className={`chat-message ${item.role}`}><span>{item.role === "agent" ? <Robot size={16} /> : <UserCircle size={16} />}</span><div>{item.role === "agent" && item.reasoning ? <details className="gen-thinking"><summary>AI thinking process</summary><pre>{item.reasoning}</pre></details> : null}<AgentMessageBody message={item} />{item.role === "agent" && item.flowchart && <RequirementFlow flowchart={item.flowchart} />}</div></div>;
-}
 
 function agentMessageFromResponse(response, content, reasoning = "") {
   const payload = response?.message_payload || (typeof response?.message === "object" ? response.message : null);
@@ -1827,22 +1661,6 @@ function agentMessageFromResponse(response, content, reasoning = "") {
   };
 }
 
-const AGENT_MESSAGE_PREVIEWS = [
-  { id: "markdown", label: "Text / Markdown", caption: "Narrative answers with headings, emphasis, lists and inline code.", message: { role: "agent", type: "markdown", content: "## Requirement analysis\nThe login flow has **three high-risk paths**:\n- Invalid password retry and lockout\n- Session expiry after 30 minutes\n- Role-based redirect to `dashboard`" } },
-  { id: "hitl", label: "HITL approval", caption: "Approve or reject a proposal and send a human comment back to the agent.", message: { role: "agent", type: "hitl", data: { title: "Add 12 generated cases to the regression suite?", description: "This will create draft cases and link them to requirement AUTH-142. Existing cases will not be changed.", risk: "Medium impact" } } },
-  { id: "actions", label: "AI actions", caption: "Actionable suggestions can be applied independently without hiding the rationale.", message: { role: "agent", type: "actions", data: { title: "Coverage improvements", detail: "I found two gaps after comparing the draft with the requirement.", actions: [{ label: "Add lockout recovery", description: "Covers cooldown expiry and a successful retry.", cta: "Add case" }, { label: "Strengthen session assertion", description: "Verify the refresh token is invalidated server-side.", cta: "Update" }] } } },
-  { id: "table", label: "Editable table", caption: "Edit cells and headers, add rows or columns, or paste a range directly from Excel.", message: { role: "agent", type: "table", data: { title: "Coverage matrix", columns: [{ key: "area", label: "Area" }, { key: "coverage", label: "Coverage" }, { key: "risk", label: "Risk" }], rows: [{ area: "Happy path", coverage: "3 cases", risk: "Covered" }, { area: "Account lockout", coverage: "1 case", risk: "Needs edge case" }, { area: "Session expiry", coverage: "2 cases", risk: "Covered" }] } } },
-  { id: "qa", label: "Agent questions", caption: "The Agent asks for missing context and the user writes and submits each answer.", message: { role: "agent", type: "qa", data: { title: "I need two details before generating cases", items: [{ id: "lockout", question: "After how many failed attempts should the account be locked?", context: "This determines the boundary cases and retry coverage.", placeholder: "For example: 5 attempts within 15 minutes" }, { id: "unlock", question: "How can a locked account be unlocked?", context: "Choose the supported recovery path or describe another one.", placeholder: "For example: automatically after 30 minutes" }] } } },
-  { id: "mindmap", label: "Mind map", caption: "A concise fishbone view for complex scope, risks and test dimensions.", message: { role: "agent", type: "mindmap", data: { title: "Checkout quality model", center: "Reliable checkout", branches: [{ label: "Cart rules", items: ["Inventory reservation", "Quantity limits", "Price refresh", "Bundle removal"] }, { label: "Customer", items: ["Guest checkout", "Signed-in profile", "B2B account", "Restricted region"] }, { label: "Payment", items: ["3DS challenge", "Wallet fallback", "Partial failure", "Duplicate callback"] }, { label: "Fulfilment", items: ["Split shipment", "Store pickup", "Address validation", "Delivery window"] }, { label: "Promotion", items: ["Stacking rules", "Expired coupon", "Loyalty credit", "Currency rounding"] }, { label: "Recovery", items: ["Idempotent retry", "Session restore", "Inventory release", "Audit trail"] }] } } },
-  { id: "swimlane", label: "Swimlane", caption: "Responsibilities and hand-offs across users, UI and services.", message: { role: "agent", type: "swimlane", data: { title: "Account lockout journey", lanes: [{ name: "User", steps: ["Submit password", "Retry", "Wait / recover"] }, { name: "Web app", steps: ["Validate input", "Show attempts", "Show lockout"] }, { name: "Auth API", steps: ["Reject login", "Increment count", "Lock account"] }] } } },
-  { id: "flowchart", label: "Flowchart", caption: "A compact staged view for complex decisions, parallel paths and merged outcomes.", message: { role: "agent", type: "flowchart", data: { title: "Adaptive sign-in flow", nodes: [{ id: "start", label: "Submit identity and credentials", kind: "start", stage: 0 }, { id: "policy", label: "Sign-in method allowed?", kind: "decision", stage: 1 }, { id: "credentials", label: "Credentials valid?", kind: "decision", stage: 2 }, { id: "deny-policy", label: "Block unsupported method", kind: "end", stage: 2 }, { id: "risk", label: "Evaluate device and location risk", kind: "decision", stage: 3 }, { id: "attempts", label: "Update failed-attempt counter", kind: "step", stage: 3 }, { id: "session", label: "Create session and rotate token", kind: "step", stage: 4 }, { id: "mfa", label: "Complete MFA challenge", kind: "decision", stage: 4 }, { id: "lock", label: "Lock or allow another retry", kind: "decision", stage: 4 }, { id: "audit", label: "Write security audit event", kind: "step", stage: 5 }, { id: "deny", label: "Return safe failure response", kind: "end", stage: 5 }, { id: "success", label: "Continue to requested product", kind: "end", stage: 6 }], edges: [{ from: "start", to: "policy" }, { from: "policy", to: "credentials", label: "Allowed" }, { from: "policy", to: "deny-policy", label: "Blocked" }, { from: "credentials", to: "risk", label: "Valid" }, { from: "credentials", to: "attempts", label: "Invalid" }, { from: "risk", to: "session", label: "Low risk" }, { from: "risk", to: "mfa", label: "Elevated" }, { from: "attempts", to: "lock" }, { from: "mfa", to: "session", label: "Verified" }, { from: "mfa", to: "deny", label: "Failed" }, { from: "lock", to: "deny", label: "Locked" }, { from: "lock", to: "credentials", label: "Retry" }, { from: "session", to: "audit" }, { from: "audit", to: "success" }] } } },
-];
-
-function AgentMessagePreview({ onClose }) {
-  const [active, setActive] = useState(AGENT_MESSAGE_PREVIEWS[0].id);
-  const preview = AGENT_MESSAGE_PREVIEWS.find((item) => item.id === active) || AGENT_MESSAGE_PREVIEWS[0];
-  return <div className="modal-layer agent-preview-layer" role="dialog" aria-modal="true" aria-label="Agent message type preview"><button className="modal-backdrop" onClick={onClose} aria-label="Close message preview" /><section className="agent-preview-modal"><header><div><span className="panel-kicker">Component gallery</span><h2>Agent message types</h2><p>Preview the isolated renderer and interaction for every supported Agent payload.</p></div><IconButton label="Close" onClick={onClose}><X size={20} /></IconButton></header><div className="agent-preview-workspace"><nav>{AGENT_MESSAGE_PREVIEWS.map((item, index) => <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{item.label}</strong><small>{item.caption}</small></div><CaretRight size={15} /></button>)}</nav><main><div className="agent-preview-heading"><div><span>Live preview</span><h3>{preview.label}</h3><p>{preview.caption}</p></div><code>type: {preview.id}</code></div><div className="agent-preview-canvas"><AgentChatMessage key={preview.id} item={preview.message} /></div><div className="agent-preview-contract"><strong>Payload contract</strong><code>{JSON.stringify({ role: preview.message.role, type: preview.message.type, data: preview.message.data ? "{…}" : undefined, content: preview.message.content ? "string" : undefined }, null, 2)}</code></div></main></div></section></div>;
-}
 
 const chineseToInt = (raw) => {
   const digits = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
@@ -2005,6 +1823,37 @@ function VueHumanApproval({ title, description, onApprove, onReject }) {
       onApprove: () => callbacksRef.current.onApprove(),
       onReject: () => callbacksRef.current.onReject(),
     });
+    app.mount(hostRef.current);
+    return () => app.unmount();
+  }, []);
+
+  return <div ref={hostRef} />;
+}
+
+function VueAgentChat({ messages, busy, liveThinking, className = "chat-messages" }) {
+  const hostRef = useRef(null);
+  const bridgeRef = useRef(null);
+
+  useEffect(() => {
+    const bridge = reactive({ messages: [], busy: false, liveThinking: "" });
+    bridgeRef.current = bridge;
+    const app = createApp(AgentChatList, { bridge });
+    app.mount(hostRef.current);
+    return () => { app.unmount(); bridgeRef.current = null; };
+  }, []);
+
+  useEffect(() => {
+    if (bridgeRef.current) Object.assign(bridgeRef.current, { messages, busy, liveThinking });
+  }, [messages, busy, liveThinking]);
+
+  return <div className={className} ref={hostRef} />;
+}
+
+function VueAgentMessagePreview({ onClose }) {
+  const hostRef = useRef(null);
+
+  useEffect(() => {
+    const app = createApp(AgentMessagePreviewVue, { onClose });
     app.mount(hostRef.current);
     return () => app.unmount();
   }, []);
@@ -2382,10 +2231,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
       </div>
       <aside className="gen-chat-side">
         <div className="gen-chat-side-heading"><span><Robot size={18} weight="duotone" /></span><div><strong>Continue with the agent</strong><small>Explain, edit, add or remove cases</small></div></div>
-        <div className="chat-messages gen-side-messages">
-          {messages.map((item, index) => <AgentChatMessage item={item} key={`${item.role}-${index}`} />)}
-          {busy && <div className="chat-message agent"><span><Robot size={16} /></span><div>{liveThinking ? <details className="gen-thinking live" open><summary>AI is thinking…</summary><pre>{liveThinking}</pre></details> : <p>The agent is working…</p>}</div></div>}
-        </div>
+        <VueAgentChat className="chat-messages gen-side-messages" messages={messages} busy={busy} liveThinking={liveThinking} />
         {error && <div className="gen-chat-error"><Warning size={15} /><span>{error}</span></div>}
         <div className="chat-suggestions">
           {!IS_GITHUB_PAGES && <button onClick={askProjectSupervisor}>Run full QA review</button>}
@@ -2432,10 +2278,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
           <button className="secondary-button" onClick={reset}><ArrowClockwise size={16} /> Start over</button>
         </div>
         <div className="gen-chat-body">
-          <div className="chat-messages">
-            {messages.map((item, index) => <AgentChatMessage item={item} key={`${item.role}-${index}`} />)}
-            {busy && <div className="chat-message agent"><span><Robot size={16} /></span><div>{liveThinking ? <details className="gen-thinking live" open><summary>AI is thinking…</summary><pre>{liveThinking}</pre></details> : <p>The agent is working…</p>}</div></div>}
-          </div>
+          <VueAgentChat messages={messages} busy={busy} liveThinking={liveThinking} />
           {error && <div className="gen-chat-error"><Warning size={15} /><span>{error}</span></div>}
           {questions.length > 0 && <div className="gen-quick-replies">
             {!!quickReplies.length && <div>{quickReplies.map(({ question, option }) => <button key={`${question.id}-${option}`} disabled={busy} onClick={() => setComposer((current) => [current.trim(), questions.length > 1 ? `${question.question}: ${option}` : option].filter(Boolean).join("\n"))}>{option}</button>)}</div>}
@@ -2477,7 +2320,7 @@ function CaseGenerationPage({ cases, project, onAdd, onToast }) {
           </section>
         </div>
       )}
-      {messagePreviewOpen && <AgentMessagePreview onClose={() => setMessagePreviewOpen(false)} />}
+      {messagePreviewOpen && <VueAgentMessagePreview onClose={() => setMessagePreviewOpen(false)} />}
     </>
   );
 }

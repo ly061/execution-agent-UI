@@ -121,6 +121,35 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_template_profiles_project
               ON template_profiles(project_id, active, created_at);
+            CREATE TABLE IF NOT EXISTS case_agent_profiles (
+              id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+              is_default INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_case_agent_default_profile
+              ON case_agent_profiles(project_id) WHERE is_default = 1;
+            CREATE TABLE IF NOT EXISTS case_agent_runs (
+              id TEXT PRIMARY KEY, project_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+              mode TEXT NOT NULL, primary_intent TEXT NOT NULL, status TEXT NOT NULL,
+              profile_id TEXT NOT NULL, config_snapshot_json TEXT NOT NULL,
+              requirement_text TEXT NOT NULL, checkpoint_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_case_agent_runs_chat ON case_agent_runs(project_id, chat_id, status);
+            CREATE TABLE IF NOT EXISTS case_agent_artifacts (
+              id TEXT PRIMARY KEY, project_id TEXT NOT NULL, run_id TEXT,
+              artifact_type TEXT NOT NULL, current_revision INTEGER NOT NULL,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS case_agent_revisions (
+              artifact_id TEXT NOT NULL, revision INTEGER NOT NULL, content_json TEXT NOT NULL,
+              diff_json TEXT NOT NULL, created_at TEXT NOT NULL,
+              PRIMARY KEY(artifact_id, revision)
+            );
+            CREATE TABLE IF NOT EXISTS case_agent_audit_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, run_id TEXT,
+              action TEXT NOT NULL, detail_json TEXT NOT NULL, created_at TEXT NOT NULL
+            );
             """
         )
         _ensure_column(db, "import_sessions", "project_id", "TEXT NOT NULL DEFAULT 'default'")
@@ -318,6 +347,117 @@ def generation_message_history(session_id: str, limit: int = 30) -> list[dict[st
             (session_id, limit),
         ).fetchall()
     return [dict(row) for row in reversed(rows)]
+
+
+# Case Agent v2 persistence.  Revisions are immutable; the artifact pointer is the
+# only mutable part, which makes every UI or agent edit auditable and rollback-safe.
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def save_case_agent_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    with connect() as db:
+        if profile.get("is_default"):
+            db.execute("UPDATE case_agent_profiles SET is_default = 0 WHERE project_id = ?", (profile["project_id"],))
+        db.execute(
+            """INSERT OR REPLACE INTO case_agent_profiles(id, project_id, name, is_default, config_json, created_at, updated_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (profile["id"], profile["project_id"], profile["name"], int(bool(profile.get("is_default"))),
+             json.dumps(profile["config"], ensure_ascii=False), profile.get("created_at", now), now),
+        )
+    return get_case_agent_profile(profile["id"]) or profile
+
+
+def get_case_agent_profile(profile_id: str) -> dict[str, Any] | None:
+    with connect() as db:
+        row = db.execute("SELECT * FROM case_agent_profiles WHERE id = ?", (profile_id,)).fetchone()
+    if not row:
+        return None
+    value = dict(row)
+    value["is_default"] = bool(value["is_default"])
+    value["config"] = json.loads(value.pop("config_json"))
+    return value
+
+
+def list_case_agent_profiles(project_id: str) -> list[dict[str, Any]]:
+    with connect() as db:
+        rows = db.execute("SELECT * FROM case_agent_profiles WHERE project_id = ? ORDER BY is_default DESC, created_at", (project_id,)).fetchall()
+    return [get_case_agent_profile(str(row["id"])) for row in rows]
+
+
+def save_case_agent_run(run: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    with connect() as db:
+        db.execute(
+            """INSERT INTO case_agent_runs(id, project_id, chat_id, mode, primary_intent, status, profile_id, config_snapshot_json, requirement_text, checkpoint_json, created_at, updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (run["id"], run["project_id"], run["chat_id"], run["mode"], run["primary_intent"], run["status"], run["profile_id"],
+             json.dumps(run["config_snapshot"], ensure_ascii=False), run["requirement_text"], json.dumps(run.get("checkpoint", {}), ensure_ascii=False), now, now),
+        )
+    return get_case_agent_run(run["id"]) or run
+
+
+def get_case_agent_run(run_id: str) -> dict[str, Any] | None:
+    with connect() as db:
+        row = db.execute("SELECT * FROM case_agent_runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        return None
+    value = dict(row)
+    value["config_snapshot"] = json.loads(value.pop("config_snapshot_json"))
+    value["checkpoint"] = json.loads(value.pop("checkpoint_json"))
+    return value
+
+
+def update_case_agent_run(run_id: str, *, status: str | None = None, checkpoint: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    run = get_case_agent_run(run_id)
+    if not run:
+        return None
+    with connect() as db:
+        db.execute("UPDATE case_agent_runs SET status=?, checkpoint_json=?, updated_at=? WHERE id=?", (status or run["status"], json.dumps(checkpoint if checkpoint is not None else run["checkpoint"], ensure_ascii=False), _now(), run_id))
+    return get_case_agent_run(run_id)
+
+
+def create_case_agent_artifact(project_id: str, run_id: str | None, artifact_type: str, content: dict[str, Any], diff: dict[str, Any] | None = None) -> dict[str, Any]:
+    artifact_id = secrets.token_hex(16)
+    now = _now()
+    with connect() as db:
+        db.execute("INSERT INTO case_agent_artifacts VALUES(?,?,?,?,?,?,?)", (artifact_id, project_id, run_id, artifact_type, 1, now, now))
+        db.execute("INSERT INTO case_agent_revisions VALUES(?,?,?,?,?)", (artifact_id, 1, json.dumps(content, ensure_ascii=False), json.dumps(diff or {}, ensure_ascii=False), now))
+    return get_case_agent_artifact(artifact_id)  # type: ignore[return-value]
+
+
+def get_case_agent_artifact(artifact_id: str, revision: int | None = None) -> dict[str, Any] | None:
+    with connect() as db:
+        artifact = db.execute("SELECT * FROM case_agent_artifacts WHERE id=?", (artifact_id,)).fetchone()
+        if not artifact:
+            return None
+        rev = revision or artifact["current_revision"]
+        row = db.execute("SELECT * FROM case_agent_revisions WHERE artifact_id=? AND revision=?", (artifact_id, rev)).fetchone()
+    if not row:
+        return None
+    return {**dict(artifact), "revision": row["revision"], "content": json.loads(row["content_json"]), "diff": json.loads(row["diff_json"])}
+
+
+def list_case_agent_artifacts(project_id: str, artifact_type: str | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT id FROM case_agent_artifacts WHERE project_id=?" + (" AND artifact_type=?" if artifact_type else "") + " ORDER BY updated_at DESC"
+    args: tuple[Any, ...] = (project_id, artifact_type) if artifact_type else (project_id,)
+    with connect() as db:
+        rows = db.execute(sql, args).fetchall()
+    return [item for row in rows if (item := get_case_agent_artifact(str(row["id"])))]
+
+
+def revise_case_agent_artifact(artifact_id: str, expected_revision: int, content: dict[str, Any], diff: dict[str, Any]) -> dict[str, Any]:
+    current = get_case_agent_artifact(artifact_id)
+    if not current:
+        raise ValueError("Artifact not found.")
+    if current["revision"] != expected_revision:
+        raise ValueError("Revision conflict. Reload the artifact before applying changes.")
+    next_revision = expected_revision + 1
+    with connect() as db:
+        db.execute("INSERT INTO case_agent_revisions VALUES(?,?,?,?,?)", (artifact_id, next_revision, json.dumps(content, ensure_ascii=False), json.dumps(diff, ensure_ascii=False), _now()))
+        db.execute("UPDATE case_agent_artifacts SET current_revision=?, updated_at=? WHERE id=?", (next_revision, _now(), artifact_id))
+    return get_case_agent_artifact(artifact_id)  # type: ignore[return-value]
 
 
 def save_memory(
